@@ -1,0 +1,430 @@
+# yaml-language-server: $schema=https://github.com/epics-containers/ibek/releases/download/3.0.1/ibek.support.schema.json
+
+# #errlogInit(5000)
+# < envPaths
+# # Tell EPICS all about the record types, device-support modules, drivers,
+# # etc.
+# dbLoadDatabase("../../dbd/newport.dbd")
+# newport_registerRecordDeviceDriver(pdbbase)
+
+# ### Motors
+# dbLoadTemplate "motor.substitutions.SMC100"
+
+# ### Serial port setup
+# drvAsynSerialPortConfigure("serial1", "/dev/ttyS0", 0, 0, 0)
+# asynSetOption(serial1,0,baud,57600)
+# asynOctetSetInputEos("serial1",0,"\r\n")
+# asynOctetSetOutputEos("serial1",0,"\r\n")
+
+# ### Newport SMC100 support
+# # (driver port, serial port, axis num, ms mov poll, ms idle poll, egu per step)
+# SMC100CreateController("SMC100_1", "serial1",1, 100, 0, "0.00005")
+
+# file "$(TOP)/db/basic_asyn_motor.db"
+# {
+# pattern
+# {P,      N,     M,         DTYP,      PORT,  ADDR,    DESC,        EGU,     DIR,  VELO,  VBAS,  ACCL,  BDST,  BVEL,  BACC,  MRES,  PREC,  DHLM,  DLLM,  INIT, RTRY}
+# {IOC:,  1,  "m$(N)",  "asynMotor",  "SMC100_1",  0,  "GTS30V",      mm,     Pos,  1,     0,    .2,    0,     .5,     .2,    0.00001,  6,     25,   -5,  ""}
+# }
+# iocInit
+
+module: motorNewport
+
+entity_models:
+  - name: SMC100CreateController
+    description: |-
+      Creates a SMC100 motion controller connected to an ethernetToSerialServer
+    parameters:
+      controllerName:
+        type: id
+        description: |-
+          The name of the controller and its Asyn Port Name
+
+      P:
+        type: str
+        description: |-
+          Device PV Prefix
+
+      IP:
+        type: str
+        description: |-
+          IP address of the ethernet2serial
+        default: 127.0.0.1 ## localhost
+
+      TCPPORT:
+        type: int
+        description: |-
+          Port of the ethernet2serial
+        default: 4001
+
+      POLL:
+        type: int
+        description: |-
+          Movement poll ms
+        default: 100
+
+      EGUXSTEP:
+        type: float
+        description: |-
+          EGU PER STEP
+        default: 0.00005
+
+      ASYNPRIO:
+        type: int
+        description: |-
+          ASYN   PRIORITY, Default : 0
+        default: 0
+
+      AUTOCONNECT:
+        type: int
+        description: |-
+          Asyn auto connect
+          0: Auto connection
+          1: no Auto connection
+        default: 0
+
+      NOPRECESSESOS:
+        type: int
+        description: |-
+          ASYN   noProcessEos, Default : 0
+          https://epics.anl.gov/tech-talk/2020/msg01705.php
+        default: 0
+
+      numAxes:
+        type: int
+        description: |-
+          The number of axes to create
+
+    pre_init:
+      - value: |
+          drvAsynIPPortConfigure("{{controllerName}}_ASYN", "{{IP}}:{{TCPPORT}}", {{ASYNPRIO}}, {{AUTOCONNECT}}, {{NOPRECESSESOS}})
+          # asynInterposeEosConfig("{{controllerName}}_ASYN",0,2000,0)
+          SMC100CreateController("SMC100_{{controllerName}}", "{{controllerName}}_ASYN","{{numAxes}}", "{{POLL}}", 0, "{{EGUXSTEP}}")
+          asynOctetSetInputEos({{controllerName}}_ASYN,0,"\r\n")
+          asynOctetSetOutputEos({{controllerName}}_ASYN,0,"\r\n")
+          asynReport 10
+
+  - name: motorAxis
+    description: |-
+      Creates a motor axis
+    parameters:
+      controller:
+        type: object
+        description: |-
+          a reference to the motion controller
+
+      M:
+        type: str
+        description: |-
+          PV suffix for the motor record
+
+      ADDR:
+        type: int
+        description: |-
+          The axis number (allowed to be from 0 to controller.numAxes-1)
+
+      DESC:
+        type: str
+        description: |-
+          The description of the axis
+
+      DLLM:
+        type: int
+        description: |-
+          The low limit of the axis
+        default: -5
+
+      DHLM:
+        type: int
+        description: |-
+          The high limit of the axis
+        default: 25
+
+      VELO:
+        type: int
+        description: |-
+          Velocity
+        default: 1
+
+      home:
+        type: int
+        description: |-
+          The home position of the axis (in counts)
+
+      start:
+        type: int
+        description: |-
+          The starting position of the axis (in counts)
+        default: 0
+
+      DIR:
+        type: enum
+        description: |-
+          The direction of the axis
+        default: 0
+        values:
+          Pos: 0
+          Neg: 1
+
+      EGU:
+        type: str
+        description: |-
+          Engineering Units
+        default: mm
+      VBAS:
+        type: float
+        description: |-
+          Base Velocity (EGU/s)
+        default: 0.2
+
+      ACCL:
+        type: float
+        description: |-
+          Seconds to Velocity
+        default: 0.2
+
+      BDST:
+        type: int
+        description: |-
+          BL Distance (EGU)
+        default: 0
+
+      BVEL:
+        type: float
+        description: |-
+          BL Velocity (EGU/s)
+        default: 0.5
+
+      BACC:
+        type: float
+        description: |-
+          BL Seconds to Veloc.
+        default: 0.2
+
+      MRES:
+        type: float
+        description: |-
+          Motor Step Size (EGU)
+        default: 0.00001
+
+      PREC:
+        type: int
+        description: |-
+          Display precision (EGU)
+        default: 6
+
+    post_init:
+      - value: |-
+          dbl
+    databases:
+      # TODO as this is a simulation I have hard coded some of the DB fields,
+      # but these could easily be made into arguments above
+      #
+      # Note: supplying no value means that the argument of the same name is used
+      # (the most common case - if you contrive to make args and db fields the same.
+      # Which is  good idea for ease of transition from traditional IOCs)
+      - file: basic_asyn_motor.db
+        args:
+          P: "{{controller.P}}"
+          N: "{{ADDR +1 }}"
+          M:
+          DTYP: asynMotor
+          PORT: SMC100_{{controller}}
+          ADDR:
+          DESC:
+          EGU:
+          DIR:
+          VELO:
+          VBAS:
+          ACCL:
+          BDST:
+          BVEL:
+          BACC:
+          MRES:
+          PREC:
+          DHLM:
+          DLLM:
+          INIT: ""
+
+  # Newport ESP300 / ESP301 / ESP302 (motorNewport drvESP300 + devESP300, a
+  # "model 2" driver: ESP300Setup once, ESP300Config per controller, motor
+  # records on basic_motor.db with DTYP "ESP300" and OUT "#C<card> S<axis-1> @").
+  # The driver reads position as TP?/<resolution>, with <resolution> = the
+  # axis's FR? (no encoder) or SU? (encoder): MRES must equal it.
+  - name: ESP300Setup
+    description: |-
+      Once per IOC, before any ESP300Controller: the driver's card table and
+      poll rate, and the two init switches ioc-motion patches into the driver
+      (upstream behaviour is init_stop: true, set_limits: true).
+    parameters:
+      max_controllers:
+        type: int
+        description: |-
+          Most ESP300-family controllers (cards) this IOC configures
+        default: 1
+      scan_rate:
+        type: int
+        description: |-
+          Poll rate while an axis moves, Hz (1 to 60)
+        default: 10
+      init_stop:
+        type: bool
+        description: |-
+          Count the controller's axes at init by sending each a Stop (ST) until
+          "axis number out of range" (upstream); false probes with a query (MO?)
+          instead, so init writes nothing to the controller.
+        default: false
+      set_limits:
+        type: bool
+        description: |-
+          Push each motor record's DHLM/DLLM into the controller's software travel
+          limits (SR/SL) at record init and on every change (upstream); false leaves
+          the controller's limits untouched and the record enforces its own.
+        default: false
+
+    pre_init:
+      - value: |
+          # ESP300Setup(max_controllers, scan_rate)
+          ESP300Setup({{max_controllers}}, {{scan_rate}})
+          # ioc-motion's read-only-init patch (README): 1 = upstream behaviour
+          var ESP300InitStop {{ 1 if init_stop else 0 }}
+          var ESP300SetLimits {{ 1 if set_limits else 0 }}
+
+  - name: ESP300Controller
+    description: |-
+      One ESP300-family controller over TCP: its Ethernet command port (ESP302)
+      or a terminal server in front of its RS-232 port. The driver sets the
+      terminators itself (CR out, LF in; replies are CR LF). The controller's
+      Ethernet port serves one client at a time.
+    parameters:
+      name:
+        type: id
+        description: |-
+          The asyn port name
+      P:
+        type: str
+        description: |-
+          PV prefix of this controller's motor records, with its trailing colon
+      address:
+        type: str
+        description: |-
+          host:port of the command port, e.g. 192.168.8.219:5001
+      card:
+        type: int
+        description: |-
+          The driver's card index (0 .. max_controllers-1); the C of each axis's OUT link
+        default: 0
+
+    pre_init:
+      - value: |
+          drvAsynIPPortConfigure("{{name}}", "{{address}}", 0, 0, 0)
+          # ESP300Config(card, asynPort, asynAddress)
+          ESP300Config({{card}}, "{{name}}", 0)
+
+  - name: ESP300Axis
+    description: |-
+      One axis of an ESP300Controller as a motor record ($(P)$(M)).
+    parameters:
+      controller:
+        type: object
+        description: |-
+          The ESP300Controller this axis belongs to
+      axis:
+        type: int
+        description: |-
+          The controller's axis number, 1 to 3 (the S of the OUT link is axis-1)
+      M:
+        type: str
+        description: |-
+          PV suffix of the motor record, e.g. m1
+      DESC:
+        type: str
+        description: |-
+          Description
+        default: ""
+      EGU:
+        type: str
+        description: |-
+          Engineering units: the controller's SN? (2 = mm)
+        default: mm
+      MRES:
+        type: float
+        description: |-
+          Motor step size (EGU): the axis's FR? (no encoder) or SU? (encoder), as read from the controller
+        default: 0.000001
+      PREC:
+        type: int
+        description: |-
+          Display precision
+        default: 3
+      DIR:
+        type: enum
+        description: |-
+          User direction
+        default: Pos
+        values:
+          Pos: Pos
+          Neg: Neg
+      VELO:
+        type: float
+        description: |-
+          Velocity (EGU/s), sent with each move; the controller's VA?
+        default: 0.1
+      VBAS:
+        type: float
+        description: |-
+          Base velocity (EGU/s); the controller's VB?
+        default: 0.0
+      ACCL:
+        type: float
+        description: |-
+          Seconds to velocity: VELO / the controller's AC?
+        default: 0.25
+      BDST:
+        type: float
+        description: |-
+          Backlash distance (EGU); 0 = no backlash move
+        default: 0
+      BVEL:
+        type: float
+        description: |-
+          Backlash velocity (EGU/s)
+        default: 0.1
+      BACC:
+        type: float
+        description: |-
+          Backlash seconds to velocity
+        default: 0.25
+      DHLM:
+        type: float
+        description: |-
+          Dial high limit (EGU); with set_limits false, enforced by the record only
+        default: 0
+      DLLM:
+        type: float
+        description: |-
+          Dial low limit (EGU); 0 and 0 = no soft limits
+        default: 0
+
+    databases:
+      - file: basic_motor.db
+        args:
+          P: "{{controller.P}}"
+          M:
+          DESC:
+          DTYP: ESP300
+          C: "{{controller.card}}"
+          S: "{{axis - 1}}"
+          DIR:
+          VELO:
+          VBAS:
+          ACCL:
+          BDST:
+          BVEL:
+          BACC:
+          MRES:
+          PREC:
+          EGU:
+          DHLM:
+          DLLM:
+          INIT: ""

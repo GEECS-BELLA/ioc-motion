@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=../../ibek-support/_scripts/support_install_variables.json
+
+# Upstream ibek-support's motorNewport recipe (ibek-support 8545fa2), plus
+# the read-only-init patch for the ESP300 driver (README "ESP300 family").
+module: motorNewport
+version: R1-3
+organization: http://github.com/epics-motor/
+
+dbds:
+  - devNewport.dbd
+  - motorRecord.dbd
+  - motorSupport.dbd
+
+libs:
+  - Newport
+  - motor
+  - asyn
+
+# Two iocsh variables, upstream behaviour by default:
+#   ESP300InitStop  (drvESP300.cc)  axis discovery by Stop (1) or by query (0)
+#   ESP300SetLimits (devESP300.cc)  push DHLM/DLLM into the controller's SR/SL (1) or not (0)
+patch_file:
+  path: esp300-read-only-init.patch
+  when: true
