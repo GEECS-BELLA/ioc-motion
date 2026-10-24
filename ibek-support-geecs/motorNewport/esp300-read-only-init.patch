@@ -59,7 +59,7 @@ index 428ade6..eb1bcd5 100644
  #variable(drvMM4000debug)
  #variable(drvPM500debug)
 diff --git a/newportApp/src/drvESP300.cc b/newportApp/src/drvESP300.cc
-index cfa6ce3..d89453c 100644
+index cfa6ce3..e71e3f0 100644
 --- a/newportApp/src/drvESP300.cc
 +++ b/newportApp/src/drvESP300.cc
 @@ -79,6 +79,12 @@ USAGE...    Motor record driver level support for Newport ESP300/100.
@@ -75,7 +75,7 @@ index cfa6ce3..d89453c 100644
  static inline void Debug(int level, const char *format, ...) {
    #ifdef DEBUG
      if (level < drvESP300debug) {
-@@ -726,12 +732,38 @@ errexit:
+@@ -726,12 +732,39 @@ errexit:
              //    total_axis = 4;
              //}
  
@@ -91,6 +91,7 @@ index cfa6ce3..d89453c 100644
 +                    recv_mess(card_index, buff, 1);
 +                    if (atoi(buff) == 0)
 +                        break;
++                    errlogPrintf("drvESP300 card %d: drained stale error: %s\n", card_index, buff);
 +                }
 +            }
 +

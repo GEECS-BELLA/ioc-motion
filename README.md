@@ -61,8 +61,8 @@ Upstream initialisation is not read-only:
    boot and on every limit change (and with `0`/`0` when the record has none).
 
 Everything else at init and in the in-motion poll is a query: `VE?`, `nnSN?`, `nnZB?`,
-`nnFR?`/`nnQS?`/`nnSU?`, `TB?`, `nnMD`, `nnTP?`, `nnZH?`, `nnPH`, `nnMO?`,
-`TE?`. `LOAD_POS` (→ `nnDH`, redefine position) is sent only when autosave
+`nnFR?`/`nnQS?`/`nnSU?`, `TB?`, `nnMD`, `nnTP?`, `nnZH?`, `nnMO?`, `TE?`
+(and `nnPH`, which the gate below never reaches). `LOAD_POS` (→ `nnDH`, redefine position) is sent only when autosave
 restores a non-zero `DVAL` onto a controller reading near zero (`RSTM`
 NearZero, the record's default) — so an IOC that must preserve positions runs
 without autosave of the record's position fields (`motor_positions.req`:
@@ -82,7 +82,8 @@ adds two iocsh variables, both defaulting to upstream behaviour:
 
 Two more lines in the same patch: with `ESP300InitStop` 0 the error FIFO is
 drained (bounded `TB?` reads) before the probe, so an error left by an earlier
-client cannot end the axis count at axis 1; and `ESP300_end_trans` no longer
+client cannot end the axis count at axis 1 (each drained error is printed on
+the console); and `ESP300_end_trans` no longer
 reads the byte before an empty transaction (upstream did, for `GET_INFO` and
 `GO`; the disabled limit push adds two per record at boot).
 
