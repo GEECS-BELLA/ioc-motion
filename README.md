@@ -66,9 +66,11 @@ NearZero, the record's default) — so an IOC that must preserve positions runs
 without autosave of motor fields. PID writes happen only for axes with an
 encoder (`GAIN_SUPPORT`) and non-zero `PCOF/ICOF/DCOF`.
 
-`esp300-read-only-init.patch` (applied by `motorNewport.install.yml`, 30
-lines, upstream R1-3) adds two iocsh variables, both defaulting to upstream
-behaviour:
+`esp300-read-only-init.patch` (applied by `motorNewport.install.yml` on
+upstream R1-3; two source files and `devNewport.dbd`, whose `variable()`
+lines are what make the switches visible to iocsh's `var` — without them
+`var` prints "No known var" and the stock behaviour runs, as the fake showed)
+adds two iocsh variables, both defaulting to upstream behaviour:
 
 | Variable | 1 (upstream) | 0 |
 |---|---|---|

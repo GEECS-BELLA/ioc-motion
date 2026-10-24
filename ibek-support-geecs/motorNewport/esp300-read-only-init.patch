@@ -31,6 +31,20 @@ index ec26a08..3e9d16e 100644
  	    break;
  	default:
  	    rtnval = ERROR;
+diff --git a/newportApp/src/devNewport.dbd b/newportApp/src/devNewport.dbd
+index 428ade6..eb1bcd5 100644
+--- a/newportApp/src/devNewport.dbd
++++ b/newportApp/src/devNewport.dbd
+@@ -23,6 +23,9 @@ registrar(SMC100Register)
+ #variable(devXPSC8Debug)
+ #variable(drvXPSC8Debug)
+ #variable(drvESP300debug)
++# ioc-motion's read-only-init patch: iocsh switches (var ESP300InitStop 0)
++variable(ESP300InitStop, int)
++variable(ESP300SetLimits, int)
+ #variable(drvMM3000debug)
+ #variable(drvMM4000debug)
+ #variable(drvPM500debug)
 diff --git a/newportApp/src/drvESP300.cc b/newportApp/src/drvESP300.cc
 index cfa6ce3..41a8c14 100644
 --- a/newportApp/src/drvESP300.cc
