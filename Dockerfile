@@ -1,17 +1,21 @@
 ARG IMAGE_EXT
 
 ARG REGISTRY=ghcr.io/epics-containers
+# Built on the simulated-motor developer image (ioc-motorsim R1-3ec2): EPICS
+# base, asyn, motor R7-4, autosave, busy, calc, sscan, sequencer, iocStats,
+# pvlogging and motorSim already built. ibek-support is pinned to the commit
+# that image was built with (8545fa2). motorNewport is the one module added.
 ARG RUNTIME=${REGISTRY}/epics-base${IMAGE_EXT}-runtime:7.0.10ec2
-ARG DEVELOPER=${REGISTRY}/epics-base${IMAGE_EXT}-developer:7.0.10ec2
+ARG DEVELOPER=${REGISTRY}/ioc-motorsim${IMAGE_EXT}-developer:R1-3ec2
 
 ##### build stage ##############################################################
 FROM  ${DEVELOPER} AS developer
 
 # The devcontainer mounts the project root to /epics/generic-source
 # Using the same location here makes devcontainer/runtime differences transparent.
+# (The template's `ln -s ${SOURCE_FOLDER}/ioc ${IOC}` is omitted: the motorsim
+# developer image already made that link, and a second ln would nest a self-link.)
 ENV SOURCE_FOLDER=/epics/generic-source
-# connect ioc source folder to its know location
-RUN ln -s ${SOURCE_FOLDER}/ioc ${IOC}
 
 # get the current versions of pvi and ibek
 COPY requirements.txt requirements.txt
@@ -22,14 +26,11 @@ WORKDIR ${SOURCE_FOLDER}/ibek-support
 COPY ibek-support/_ansible _ansible
 ENV PATH=$PATH:${SOURCE_FOLDER}/ibek-support/_ansible
 
-COPY ibek-support/iocStats/ iocStats
-RUN ansible.sh iocStats
-
-COPY ibek-support/pvlogging/ pvlogging/
-RUN ansible.sh pvlogging
-
-COPY ibek-support/autosave/ autosave
-RUN ansible.sh autosave
+# motorNewport R1-3: upstream ibek-support's recipe with the ESP300
+# read-only-init patch and the ESP300 entities (README "ESP300 family").
+# Only this copy is in the image, so ansible finds the module once.
+COPY ibek-support-geecs/motorNewport/ ${SOURCE_FOLDER}/ibek-support-geecs/motorNewport/
+RUN ansible.sh motorNewport
 
 # get the ioc source and build it
 COPY ioc ${SOURCE_FOLDER}/ioc
