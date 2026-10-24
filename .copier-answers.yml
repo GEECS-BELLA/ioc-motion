@@ -1,0 +1,10 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: 4.8.0
+_src_path: https://github.com/epics-containers/ioc-template.git
+description: 'Generic IOC for motion controllers on the motor record: motorNewport
+    (ESP300/301/302, SMC100, CONEX, XPS) and motorSim'
+git_platform: github.com
+github_org: GEECS-BELLA
+name: ioc-motion
+repo_uri: git@github.com:GEECS-BELLA/ioc-motion.git
+rtems: false
