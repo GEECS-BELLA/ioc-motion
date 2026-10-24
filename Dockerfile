@@ -13,9 +13,9 @@ FROM  ${DEVELOPER} AS developer
 
 # The devcontainer mounts the project root to /epics/generic-source
 # Using the same location here makes devcontainer/runtime differences transparent.
+# (The template's `ln -s ${SOURCE_FOLDER}/ioc ${IOC}` is omitted: the motorsim
+# developer image already made that link, and a second ln would nest a self-link.)
 ENV SOURCE_FOLDER=/epics/generic-source
-# connect ioc source folder to its know location
-RUN ln -s ${SOURCE_FOLDER}/ioc ${IOC}
 
 # get the current versions of pvi and ibek
 COPY requirements.txt requirements.txt

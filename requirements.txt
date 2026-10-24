@@ -4,7 +4,8 @@
 #
 # pvi is listed explicitly (above ibek) so it can be bumped without an ibek
 # release. 0.14.1 fixes sub-screen button links broken in 0.14.0
-# (https://github.com/epics-containers/pvi/pull/203). 0.14.2 is the current release.
+# (https://github.com/epics-containers/pvi/pull/203). The floor matches the
+# motorsim developer image this one builds on (R1-3ec2: pvi>=0.14.4).
 pvi>=0.14.4,<0.15
 # 4.8.2 is the current release
 ibek>=4.8.2,<5

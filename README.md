@@ -35,16 +35,18 @@ Ethernet command port (TCP 5001, one client at a time; an ESP301's RS-232 port
 needs a terminal server). The ibek entities, in
 `ibek-support-geecs/motorNewport/motorNewport.ibek.support.yaml`:
 
-- `motorNewport.ESP300Setup` — once per IOC: `max_controllers`, `scan_rate`,
-  and the two switches below.
+- `motorNewport.ESP300Setup` — once per IOC, before any controller (stated,
+  not enforced: a second one re-allocates the card table): `max_controllers`,
+  `scan_rate`, and the two switches below.
 - `motorNewport.ESP300Controller` — the asyn IP port and the card.
 - `motorNewport.ESP300Axis` — one motor record per axis.
 
 **Resolution.** The driver reports position as `TP? / resolution`, where
 resolution is the axis's `FR?` (no encoder, `ZB?` bits 8-9 clear) or `SU?`
 (encoder). `MRES` must equal that number or RBV is off by its ratio. Read it
-from the controller before writing the config (the U_ESP302_01 snapshot in
-geecs-epics is the example: `FR? 1e-06`, so `MRES: 0.000001`).
+from the controller before writing the config (the first ESP302's snapshot in
+geecs-epics is the example: `FR? 1e-06`, so `MRES: 0.000001`); the entity has
+no default for it on purpose.
 
 ### What the stock driver writes at start, and the patch
 
@@ -58,12 +60,13 @@ Upstream initialisation is not read-only:
    controller's software travel limits overwritten with the record's, at every
    boot and on every limit change (and with `0`/`0` when the record has none).
 
-Everything else at init and in the poll is a query: `VE?`, `nnSN?`, `nnZB?`,
+Everything else at init and in the in-motion poll is a query: `VE?`, `nnSN?`, `nnZB?`,
 `nnFR?`/`nnQS?`/`nnSU?`, `TB?`, `nnMD`, `nnTP?`, `nnZH?`, `nnPH`, `nnMO?`,
 `TE?`. `LOAD_POS` (→ `nnDH`, redefine position) is sent only when autosave
 restores a non-zero `DVAL` onto a controller reading near zero (`RSTM`
 NearZero, the record's default) — so an IOC that must preserve positions runs
-without autosave of motor fields. PID writes happen only for axes with an
+without autosave of the record's position fields (`motor_positions.req`:
+DVAL and friends; settings autosave is fine). PID writes happen only for axes with an
 encoder (`GAIN_SUPPORT`) and non-zero `PCOF/ICOF/DCOF`.
 
 `esp300-read-only-init.patch` (applied by `motorNewport.install.yml` on
@@ -77,13 +80,21 @@ adds two iocsh variables, both defaulting to upstream behaviour:
 | `ESP300InitStop` | count axes with `ST` | count axes with `nnMO?` (an axis out of range answers nothing and sets error 9, as `ST` does; the read times out once, 5 s) |
 | `ESP300SetLimits` | push DHLM/DLLM into `SR`/`SL` | the record enforces its own soft limits; the controller's travel limits stay what the stage was set up with |
 
+Two more lines in the same patch: with `ESP300InitStop` 0 the error FIFO is
+drained (bounded `TB?` reads) before the probe, so an error left by an earlier
+client cannot end the axis count at axis 1; and `ESP300_end_trans` no longer
+reads the byte before an empty transaction (upstream did, for `GET_INFO` and
+`GO`; the disabled limit push adds two per record at boot).
+
 The `ESP300Setup` entity renders them from `init_stop` / `set_limits`, which
 **default to false**: in GEECS the controller's limits are the stage's
 physical travel and the record's are the operating range, two different
 things, and an IOC restart must not move or reconfigure a mirror mount. With
 both false, a boot sends the controller nothing but queries — checked against
 the protocol fake in geecs-epics (`sim/esp300_sim.py`, which logs any
-non-query as `WRITE`) and against the real ESP302 with the asyn trace on.
+non-query as `WRITE`) and against a real ESP302 with the asyn trace on
+(geecs-epics#21). Expected boot noise: the probe of the first axis past the
+last one waits 5 s and, with `ASYN_TRACE_ERROR` on, prints one timeout line.
 The change is worth proposing upstream (a query-based axis count; limits
 optional); until then it lives here.
 

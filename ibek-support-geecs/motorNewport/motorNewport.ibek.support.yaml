@@ -308,7 +308,7 @@ entity_models:
       address:
         type: str
         description: |-
-          host:port of the command port, e.g. 192.168.8.219:5001
+          host:port of the command port, e.g. 192.0.2.10:5001
       card:
         type: int
         description: |-
@@ -350,8 +350,9 @@ entity_models:
       MRES:
         type: float
         description: |-
-          Motor step size (EGU): the axis's FR? (no encoder) or SU? (encoder), as read from the controller
-        default: 0.000001
+          Motor step size (EGU): the axis's FR? (no encoder) or SU? (encoder), as
+          read from the controller. No default on purpose: the driver scales TP?
+          by it, and a wrong value is silent at init.
       PREC:
         type: int
         description: |-

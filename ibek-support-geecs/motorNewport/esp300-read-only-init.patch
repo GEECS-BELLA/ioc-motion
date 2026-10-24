@@ -1,5 +1,5 @@
 diff --git a/newportApp/src/devESP300.cc b/newportApp/src/devESP300.cc
-index ec26a08..3e9d16e 100644
+index ec26a08..219e463 100644
 --- a/newportApp/src/devESP300.cc
 +++ b/newportApp/src/devESP300.cc
 @@ -98,6 +98,13 @@ static msg_types ESP300_table[] = {
@@ -16,6 +16,19 @@ index ec26a08..3e9d16e 100644
  static struct board_stat **ESP300_cards;
  
  /* --------------------------- program data --------------------- */
+@@ -149,9 +156,9 @@ static RTN_STATUS ESP300_end_trans(struct motorRecord *mr)
+     /* Remove trailing ';'s from message. */
+     motor_call = &(trans->motor_call);
+     msgptr = motor_call->message;
+-    last = strlen(msgptr) - 1;
+-    if (msgptr[last] == ';')
+-    msgptr[last] = (char) NULL;
++    last = strlen(msgptr);
++    if (last > 0 && msgptr[last - 1] == ';')  /* an empty transaction has no last byte */
++        msgptr[last - 1] = (char) NULL;
+ 
+     return(motor_end_trans_com(mr, drvtabptr));
+ }
 @@ -280,10 +287,12 @@ static RTN_STATUS ESP300_build_trans(motor_cmnd command, double *parms, struct m
  	    sprintf(buff, "%.2dMF;", axis);
  	    break;
@@ -46,7 +59,7 @@ index 428ade6..eb1bcd5 100644
  #variable(drvMM4000debug)
  #variable(drvPM500debug)
 diff --git a/newportApp/src/drvESP300.cc b/newportApp/src/drvESP300.cc
-index cfa6ce3..41a8c14 100644
+index cfa6ce3..d89453c 100644
 --- a/newportApp/src/drvESP300.cc
 +++ b/newportApp/src/drvESP300.cc
 @@ -79,6 +79,12 @@ USAGE...    Motor record driver level support for Newport ESP300/100.
@@ -62,7 +75,26 @@ index cfa6ce3..41a8c14 100644
  static inline void Debug(int level, const char *format, ...) {
    #ifdef DEBUG
      if (level < drvESP300debug) {
-@@ -730,8 +736,19 @@ errexit:
+@@ -726,12 +732,38 @@ errexit:
+             //    total_axis = 4;
+             //}
+ 
++            if (!ESP300InitStop)
++            {
++                /* Drain the controller's error FIFO (10 deep; TB? pops one per
++                 * read) so an error left by an earlier client cannot end the
++                 * axis count below at axis 1. */
++                int drain;
++                for (drain = 0; drain < 10; drain++)
++                {
++                    send_mess(card_index, "TB?", 0);
++                    recv_mess(card_index, buff, 1);
++                    if (atoi(buff) == 0)
++                        break;
++                }
++            }
++
+             // Stop all motors, checking for "Axis number out of range" to determine
              // the number of axes on the device.
              for (motor_index = 0; motor_index < ESP300_MAX_AXIS; motor_index++)
              {
