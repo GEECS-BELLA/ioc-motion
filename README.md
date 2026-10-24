@@ -87,6 +87,19 @@ non-query as `WRITE`) and against the real ESP302 with the asyn trace on.
 The change is worth proposing upstream (a query-based axis count; limits
 optional); until then it lives here.
 
+### Known gaps in the upstream driver (R1-3), seen on the bench
+
+- **Hardware limit and home bits are never read.** `set_status` decides
+  whether to send `PH` with `use_limits = (limits&0x1 == 0) || (limits&0x5 == 0)`;
+  `==` binds tighter than `&`, so both terms are `limits & 0` and `PH` is never
+  sent (the bench transcripts have no `PH`). The record's `HLS`/`LLS`/`ATHM`
+  are therefore 0 by construction. The controller's own hardware limits still
+  stop the stage; the record just does not know. Worth an upstream fix.
+- **Idle axes are not polled.** A model-2 driver polls only while a motor
+  it started is moving; after init nothing is sent until a record processes
+  (`STUP`, a move). A position changed from the controller's front panel is
+  not seen until then.
+
 ### Testing without hardware
 
 geecs-epics `hosts/sim/compose.yaml` (profile `motion`) runs this image
