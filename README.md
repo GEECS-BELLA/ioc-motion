@@ -20,7 +20,7 @@ organisation's package registry is set up it is built where it runs:
 
 ```
 docker build --target runtime -t ioc-motion:local .        # on the IOC host
-TARGET=runtime TAG=ioc-motion:local ./build                 # a workstation (amd64, emulated on Apple silicon)
+DOCKER_DEFAULT_PLATFORM=linux/amd64 TARGET=runtime TAG=ioc-motion:local ./build                 # a workstation (amd64, emulated on Apple silicon)
 ```
 
 The compose files in geecs-epics name `ioc-motion:local`; the pin is this
