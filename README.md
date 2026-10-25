@@ -8,7 +8,7 @@ pvlogging, **motorSim**) plus:
 
 | Module | Version | Source | Reuse (decision 10) |
 |---|---|---|---|
-| motorNewport | R1-3 | [epics-motor/motorNewport](https://github.com/epics-motor/motorNewport) (EPICS Open License) | tier 1, dependency, with one build-time patch (below) |
+| motorNewport | R1-3 | [epics-motor/motorNewport](https://github.com/epics-motor/motorNewport) (ships no LICENSE file; tier 1 rests on the epics-motor org, geecs-epics device catalogue) | tier 1, dependency, with one build-time patch (below) |
 
 Drivers for the other families in the catalogue (NewFocus Picomotor, Zaber,
 PI GCS2) join this image when their first device is ported.
@@ -19,8 +19,8 @@ No vendor code is inside, so the image could be published; until the
 organisation's package registry is set up it is built where it runs:
 
 ```
-docker build --target runtime -t ioc-motion:local .        # on the IOC host
-DOCKER_DEFAULT_PLATFORM=linux/amd64 TARGET=runtime TAG=ioc-motion:local ./build                 # a workstation (amd64, emulated on Apple silicon)
+docker build --target runtime -t ioc-motion:local .                              # on the IOC host
+DOCKER_DEFAULT_PLATFORM=linux/amd64 TARGET=runtime TAG=ioc-motion:local ./build  # a workstation (amd64, emulated on Apple silicon)
 ```
 
 The compose files in geecs-epics name `ioc-motion:local`; the pin is this

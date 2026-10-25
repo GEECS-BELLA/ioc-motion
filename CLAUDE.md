@@ -10,13 +10,14 @@ Details, the patch and the driver's gaps: `README.md`.
   and its fake twin `esptest1-sim` (`hosts/sim`, profile `motion`).
 - **Why ours.** No epics-containers image carries motorNewport (TAU
   Systems' `ioc-motornewport` is tier 2, reference only: geecs-epics
-  decision 10). Other motor families (NewFocus, Zaber, PI GCS2) join this
-  image with their first device (decision 11).
+  decision 10). The other motor families geecs-epics' device catalogue
+  assigns to `ioc-motion` join with their first device (decision 11).
 - **Patch and switch.** `ibek-support-geecs/motorNewport/esp300-read-only-init.patch`:
   iocsh variables `ESP300InitStop` and `ESP300SetLimits`, C default 1
   (upstream: a stop per axis to count them, DHLM/DLLM pushed into the
   controller); the `ESP300Setup` entity's `init_stop` / `set_limits` default
-  to false, so a boot sends queries only. The `variable()` lines in the dbd
+  to false, so a boot sends queries only (with no autosave of the position
+  fields: README). The `variable()` lines in the dbd
   are what make `var` work: without them iocsh prints "No known var" and the
   stock behaviour runs.
 - **Build.** On the IOC host: `docker build --target runtime -t ioc-motion:local ~/ioc-motion`.
