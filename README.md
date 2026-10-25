@@ -10,8 +10,9 @@ pvlogging, **motorSim**) plus:
 |---|---|---|---|
 | motorNewport | R1-3 | [epics-motor/motorNewport](https://github.com/epics-motor/motorNewport) (ships no LICENSE file; tier 1 rests on the epics-motor org, geecs-epics device catalogue) | tier 1, dependency, with one build-time patch (below) |
 
-Drivers for the other families in the catalogue (NewFocus Picomotor, Zaber,
-PI GCS2) join this image when their first device is ported.
+Drivers for the other families geecs-epics' device catalogue assigns to
+this image (NewFocus Picomotor, Zaber, PI GCS2, Aerotech Ensemble) join it
+when their first device is ported.
 
 ## Build
 
