@@ -5,9 +5,8 @@
 # asynMotor). EnsembleAsynSetup once, then per controller an IP port,
 # EnsembleAsynConfig (which talks to the controller at once: probe, then
 # GETPARM per axis) and drvAsynMotorConfigure; motor records on
-# EnsembleMotor.db. ASCII over TCP (Socket2Port, default 8000), LF both ways,
-# replies "%<value>" (ACK), "!" (NAK), "#" (fault), "$" (timeout).
-# README "Aerotech Ensemble" for what each command does and the patch.
+# EnsembleMotor.db. Protocol, what each call sends and the patch: README
+# "Aerotech Ensemble".
 
 module: motorAerotech
 
@@ -29,8 +28,9 @@ entity_models:
           Upstream: probe the controller with the invalid command NONE and send
           RAMP MODE @n RATE per axis and WAIT MODE NOWAIT at configuration.
           false probes with the query PLANESTATUS(0) and sends the two mode
-          commands only before an axis's first move, jog or home, so a boot
-          and the idle poll send the controller queries only.
+          commands before every move, jog or home (which is refused unless
+          both are acknowledged), so a boot and the idle poll send the
+          controller queries only.
         default: false
 
     pre_init:
@@ -114,7 +114,7 @@ entity_models:
     description: |-
       One driver axis of an EnsembleController as a motor record ($(P)$(M)) on
       EnsembleMotor.db (RSTM Never: the record never redefines the controller's
-      position; DISP 1 refuses every put to the record).
+      position; RTRY 0; DISP 1 by default refuses puts to the record).
     parameters:
       controller:
         type: object
@@ -202,9 +202,11 @@ entity_models:
       DISP:
         type: bool
         description: |-
-          Refuse every put to the record's fields (CA, PVA and the iocsh's dbpf)
-          while the driver's status callbacks keep its readbacks live
-        default: false
+          Refuse every put to the record's fields but DISP itself (CA, PVA,
+          the iocsh's dbpf; not database links inside the IOC) while the
+          driver's status callbacks keep its readbacks live. Default true: an
+          instance that writes says so with DISP false.
+        default: true
 
     databases:
       - file: EnsembleMotor.db

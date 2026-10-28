@@ -10,8 +10,7 @@ Details, the patch and the driver's gaps: `README.md`.
   (ESP302 `U_ESP302_01`, `hosts/htu-linux-camserv2`, profile `bench-esp`)
   and its fake twin `esptest1-sim` (`hosts/sim`, profile `motion`);
   `enstest1` (Aerotech Ensemble `U_CompAerotech`, the compressor gratings,
-  read-only, profile `bench-ens`, image tag `ioc-motion:aerotech` until this
-  driver's PR merges).
+  read-only, profile `bench-ens`).
 - **Why ours.** No epics-containers image carries motorNewport (TAU
   Systems' `ioc-motornewport` is tier 2, reference only: geecs-epics
   decision 10). The other motor families geecs-epics' device catalogue
@@ -27,9 +26,7 @@ Details, the patch and the driver's gaps: `README.md`.
   `ibek-support-geecs/motorAerotech/aerotech-ensemble-read-only-init.patch`:
   iocsh variable `EnsembleInitWrites`, C default 1 (upstream: a `NONE` probe,
   `RAMP MODE` and `WAIT MODE NOWAIT` at config); the `EnsembleSetup`
-  entity's `init_writes` defaults to false (a query probe, the mode commands
-  deferred to the first motion command), and `EnsembleMotor.db` defaults
-  `RSTM` to Never (README "Aerotech Ensemble").
+  entity's `init_writes` defaults to false (README "Aerotech Ensemble").
 - **Build.** On the IOC host: `docker build --target runtime -t ioc-motion:local ~/ioc-motion`.
   On a workstation: `DOCKER_DEFAULT_PLATFORM=linux/amd64 TARGET=runtime
   TAG=ioc-motion:local ./build` (the variable is required on Apple silicon; the

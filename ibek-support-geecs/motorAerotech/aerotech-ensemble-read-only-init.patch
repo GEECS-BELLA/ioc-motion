@@ -64,26 +64,10 @@ index 3619889..d7bb795 100644
  # Aerotech A3200 asynMotor support
  driver(motorA3200)
 diff --git a/aerotechApp/src/drvEnsembleAsyn.cc b/aerotechApp/src/drvEnsembleAsyn.cc
-index 9e4d783..07c79cf 100644
+index 9e4d783..b69d5c7 100644
 --- a/aerotechApp/src/drvEnsembleAsyn.cc
 +++ b/aerotechApp/src/drvEnsembleAsyn.cc
-@@ -141,6 +141,7 @@ typedef struct
-     epicsEventId pollEventId;
-     epicsMutexId sendReceiveMutex;
-     AXIS_HDL pAxis;  /* array of axes */
-+    bool waitModePending; /* ioc-motion: WAIT MODE NOWAIT deferred to the first motion command */
- } EnsembleController;
- 
- typedef struct motorAxisHandle
-@@ -162,6 +163,7 @@ typedef struct motorAxisHandle
-     Switch_Level swconfig;
-     int lastFault;
-     bool ReverseDirec;
-+    bool rampModePending; /* ioc-motion: RAMP MODE RATE deferred to this axis's first motion command */
- } motorAxis;
- 
- typedef struct
-@@ -211,6 +213,36 @@ the Ensemble parameters specified */
+@@ -211,6 +211,48 @@ the Ensemble parameters specified */
  #define ASCII_TIMEOUT_CHAR  '$'   /* AsciiCmdTimeoutChar */
  
  static motorEnsemble_t drv = {NULL, NULL, motorEnsembleLogMsg, 0, {0, 0}};
@@ -92,59 +76,74 @@ index 9e4d783..07c79cf 100644
 + * behaviour) probes the controller with the invalid command "NONE" and sends
 + * "RAMP MODE @n RATE" per axis and "WAIT MODE NOWAIT" from EnsembleAsynConfig;
 + * 0 probes with the query "PLANESTATUS(0)" (which the poller sends anyway) and
-+ * defers the two mode commands to the first motion command (move, jog, home)
-+ * of the axis, so a boot and the idle poll send queries only.
++ * sends the two mode commands before every motion command (move, jog, home)
++ * instead, so a boot and the idle poll send queries only. Both are idempotent;
++ * sending them each time also covers a controller restarted after the IOC.
 + * Set before EnsembleAsynConfig: var EnsembleInitWrites 0 */
 +volatile int EnsembleInitWrites = 1;
 +extern "C" {epicsExportAddress(int, EnsembleInitWrites);}
 +
-+/* The deferred mode commands, sent before the first motion command of an axis
-+ * when EnsembleInitWrites is 0 (nothing pending otherwise). */
-+static void sendDeferredModes(AXIS_HDL pAxis)
++/* With EnsembleInitWrites 0, the mode commands before a motion command. A
++ * motion command is not sent unless both are acknowledged: without WAIT MODE
++ * NOWAIT the ASCII interpreter blocks during the move (the driver's own
++ * comment) and the poll stops. Returns MOTOR_AXIS_OK or MOTOR_AXIS_ERROR. */
++static int sendMotionModes(AXIS_HDL pAxis)
 +{
 +    char inputBuff[BUFFER_SIZE], outputBuff[BUFFER_SIZE];
 +    EnsembleController *pController = pAxis->pController;
 +
-+    if (pAxis->rampModePending)
++    inputBuff[0] = '\0';
++    if (EnsembleInitWrites)
++        return MOTOR_AXIS_OK;              /* sent at EnsembleAsynConfig, as upstream */
++    sprintf(outputBuff, "RAMP MODE @%d RATE", pAxis->axis);
++    if (sendAndReceive(pController, outputBuff, inputBuff, sizeof(inputBuff)) != asynSuccess ||
++        inputBuff[0] != ASCII_ACK_CHAR)
 +    {
-+        sprintf(outputBuff, "RAMP MODE @%d RATE", pAxis->axis);
-+        if (sendAndReceive(pController, outputBuff, inputBuff, sizeof(inputBuff)) == asynSuccess)
-+            pAxis->rampModePending = false;
++        PRINT(pAxis->logParam, TERROR, "drvEnsembleAsyn: %s not acknowledged (%s): motion command not sent\n",
++              outputBuff, inputBuff);
++        return MOTOR_AXIS_ERROR;
 +    }
-+    if (pController->waitModePending)
++    if (sendAndReceive(pController, (char *) "WAIT MODE NOWAIT", inputBuff, sizeof(inputBuff)) != asynSuccess ||
++        inputBuff[0] != ASCII_ACK_CHAR)
 +    {
-+        if (sendAndReceive(pController, (char *) "WAIT MODE NOWAIT", inputBuff, sizeof(inputBuff)) == asynSuccess)
-+            pController->waitModePending = false;
++        PRINT(pAxis->logParam, TERROR, "drvEnsembleAsyn: WAIT MODE NOWAIT not acknowledged (%s): motion command not sent\n",
++              inputBuff);
++        return MOTOR_AXIS_ERROR;
 +    }
++    return MOTOR_AXIS_OK;
 +}
++
  static int numEnsembleControllers;
  /* Pointer to array of controller structures */
  static EnsembleController *pEnsembleController=NULL;
-@@ -491,6 +523,7 @@ static int motorAxisMove(AXIS_HDL pAxis, double position, int relative,
+@@ -491,6 +533,8 @@ static int motorAxisMove(AXIS_HDL pAxis, double position, int relative,
      if (pAxis == NULL || pAxis->pController == NULL)
          return (MOTOR_AXIS_ERROR);
  
-+    sendDeferredModes(pAxis);
++    if (sendMotionModes(pAxis) != MOTOR_AXIS_OK)
++        return (MOTOR_AXIS_ERROR);
      axis = pAxis->axis;
      maxDigits = pAxis->maxDigits;
  
-@@ -557,6 +590,7 @@ static int motorAxisHome(AXIS_HDL pAxis, double min_velocity, double max_velocit
+@@ -557,6 +601,8 @@ static int motorAxisHome(AXIS_HDL pAxis, double min_velocity, double max_velocit
      if (pAxis == NULL || pAxis->pController == NULL)
          return (MOTOR_AXIS_ERROR);
  
-+    sendDeferredModes(pAxis);
++    if (sendMotionModes(pAxis) != MOTOR_AXIS_OK)
++        return (MOTOR_AXIS_ERROR);
      axis = pAxis->axis;
      
      PRINT(pAxis->logParam, FLOW, "motorAxisHome: set card %d, axis %d to home, forwards = %d\n",
-@@ -618,6 +652,7 @@ static int motorAxisVelocityMove(AXIS_HDL pAxis, double min_velocity, double vel
+@@ -618,6 +664,8 @@ static int motorAxisVelocityMove(AXIS_HDL pAxis, double min_velocity, double vel
      if (pAxis == NULL || pAxis->pController == NULL)
          return(MOTOR_AXIS_ERROR);
  
-+    sendDeferredModes(pAxis);
++    if (sendMotionModes(pAxis) != MOTOR_AXIS_OK)
++        return (MOTOR_AXIS_ERROR);
      sprintf(outputBuff, "SETPARM @%d, %d, %.*f", pAxis->axis, PARAMETERID_AbortDecelRate,
              pAxis->maxDigits, acceleration * fabs(pAxis->stepSize));
      ret_status = sendAndReceive(pAxis->pController, outputBuff, inputBuff, sizeof(inputBuff));
-@@ -941,7 +976,7 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -941,7 +989,7 @@ int EnsembleAsynConfig(int card,             /* Controller number */
      {
          /* we only care if we get a response
          so we don't need to send a valid command */
@@ -153,36 +152,32 @@ index 9e4d783..07c79cf 100644
          status = sendAndReceive(pController, outputBuff, inputBuff, sizeof(inputBuff));
  
          retry++;
-@@ -1004,9 +1039,14 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -1004,9 +1052,12 @@ int EnsembleAsynConfig(int card,             /* Controller number */
              if (inputBuff[0] == ASCII_ACK_CHAR)
                  pAxis->swconfig.All = atoi(&inputBuff[1]);
  
 -            /* Set RAMP MODE to RATE. */
 -            sprintf(outputBuff, "RAMP MODE @%d RATE", axis);
 -            sendAndReceive(pController, outputBuff, inputBuff, sizeof(inputBuff));
-+            /* Set RAMP MODE to RATE (with EnsembleInitWrites 0, before this axis's first motion command). */
++            /* Set RAMP MODE to RATE (with EnsembleInitWrites 0, before each motion command). */
 +            if (EnsembleInitWrites)
 +            {
 +                sprintf(outputBuff, "RAMP MODE @%d RATE", axis);
 +                sendAndReceive(pController, outputBuff, inputBuff, sizeof(inputBuff));
 +            }
-+            else
-+                pAxis->rampModePending = true;
  
              /* Get Reverse Direction indicator. */
              sprintf(outputBuff, getparamstr, axis, PARAMETERID_ReverseMotionDirection);
-@@ -1016,8 +1056,12 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -1016,8 +1067,10 @@ int EnsembleAsynConfig(int card,             /* Controller number */
          }
      }
  
 -    /* Prevent ASCII interpreter from blocking during MOVEABS/INC commands */
 -    sendAndReceive(pController, (char *) "WAIT MODE NOWAIT", inputBuff, sizeof(inputBuff));
 +    /* Prevent ASCII interpreter from blocking during MOVEABS/INC commands
-+     * (with EnsembleInitWrites 0, before the first motion command). */
++     * (with EnsembleInitWrites 0, before each motion command). */
 +    if (EnsembleInitWrites)
 +        sendAndReceive(pController, (char *) "WAIT MODE NOWAIT", inputBuff, sizeof(inputBuff));
-+    else
-+        pController->waitModePending = true;
  
      pController->pollEventId = epicsEventMustCreate(epicsEventEmpty);
  
