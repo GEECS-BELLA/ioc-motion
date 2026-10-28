@@ -1,0 +1,219 @@
+# yaml-language-server: $schema=https://github.com/epics-containers/ibek/releases/download/3.0.1/ibek.support.schema.json
+
+# Aerotech Ensemble (motorAerotech drvEnsembleAsyn): an old-style asyn motor
+# driver (motorAxisDrvSET_t "motorEnsemble" under drvAsynMotorConfigure, DTYP
+# asynMotor). EnsembleAsynSetup once, then per controller an IP port,
+# EnsembleAsynConfig (which talks to the controller at once: probe, then
+# GETPARM per axis) and drvAsynMotorConfigure; motor records on
+# EnsembleMotor.db. ASCII over TCP (Socket2Port, default 8000), LF both ways,
+# replies "%<value>" (ACK), "!" (NAK), "#" (fault), "$" (timeout).
+# README "Aerotech Ensemble" for what each command does and the patch.
+
+module: motorAerotech
+
+entity_models:
+  - name: EnsembleSetup
+    description: |-
+      Once per IOC, before any EnsembleController: the driver's controller table
+      and the init switch ioc-motion patches into the driver (upstream behaviour
+      is init_writes: true).
+    parameters:
+      max_controllers:
+        type: int
+        description: |-
+          Most Ensemble controllers this IOC configures
+        default: 1
+      init_writes:
+        type: bool
+        description: |-
+          Upstream: probe the controller with the invalid command NONE and send
+          RAMP MODE @n RATE per axis and WAIT MODE NOWAIT at configuration.
+          false probes with the query PLANESTATUS(0) and sends the two mode
+          commands only before an axis's first move, jog or home, so a boot
+          and the idle poll send the controller queries only.
+        default: false
+
+    pre_init:
+      - value: |
+          # EnsembleAsynSetup(max_controllers)
+          EnsembleAsynSetup({{max_controllers}})
+          # ioc-motion's read-only-init patch (README): 1 = upstream behaviour
+          var EnsembleInitWrites {{ 1 if init_writes else 0 }}
+
+  - name: EnsembleController
+    description: |-
+      One Ensemble over TCP (its ASCII command socket). The driver sets the
+      terminators itself (LF both ways). It talks to the controller inside
+      EnsembleAsynConfig, so the asyn trace, when asked for, is switched on
+      between the IP port and that call.
+    parameters:
+      name:
+        type: id
+        description: |-
+          The motor asyn port name (the axes' PORT); the TCP port is <name>_IP
+      P:
+        type: str
+        description: |-
+          PV prefix of this controller's motor records, with its trailing colon
+      address:
+        type: str
+        description: |-
+          host:port of the ASCII command socket, e.g. 192.0.2.10:8000
+      card:
+        type: int
+        description: |-
+          The driver's controller index (0 .. max_controllers-1)
+        default: 0
+      num_axes:
+        type: int
+        description: |-
+          Axes to use: the driver takes the first num_axes axis numbers (0..9)
+          that answer GETPARM(@n, AxisName) with an ACK, in order, as driver
+          axes 0..num_axes-1. A missing drive shifts every later axis down.
+      moving_poll_ms:
+        type: int
+        description: |-
+          Poll period while an axis moves, ms
+        default: 100
+      idle_poll_ms:
+        type: int
+        description: |-
+          Poll period while idle, ms; 0 = no idle poll. Keep it below the
+          controller's Socket2Timeout or the controller closes the socket.
+        default: 1000
+      trace:
+        type: bool
+        description: |-
+          asyn trace (errors, I/O, escaped) on the TCP port from before the
+          first byte: every command and reply on the console
+        default: false
+
+    pre_init:
+      - value: |
+          drvAsynIPPortConfigure("{{name}}_IP", "{{address}}", 0, 0, 0)
+          {% if trace %}
+          asynSetTraceIOMask("{{name}}_IP", -1, 0x2)
+          asynSetTraceMask("{{name}}_IP", -1, 0x9)
+          {% endif %}
+          # EnsembleAsynConfig(card, asynPort, asynAddress, numAxes, movingPollMs, idlePollMs)
+          EnsembleAsynConfig({{card}}, "{{name}}_IP", 0, {{num_axes}}, {{moving_poll_ms}}, {{idle_poll_ms}})
+          # drvAsynMotorConfigure(motorPort, driverName, card, numAxes)
+          drvAsynMotorConfigure("{{name}}", "motorEnsemble", {{card}}, {{num_axes}})
+
+  - name: EnsembleAxis
+    description: |-
+      One driver axis of an EnsembleController as a motor record ($(P)$(M)) on
+      EnsembleMotor.db (RSTM Never: the record never redefines the controller's
+      position; DISP 1 refuses every put to the record).
+    parameters:
+      controller:
+        type: object
+        description: |-
+          The EnsembleController this axis belongs to
+      addr:
+        type: int
+        description: |-
+          The driver axis, 0 .. num_axes-1 (the order the controller's axes
+          answered at init, which is the Ensemble axis number only when no
+          lower-numbered drive is missing)
+      M:
+        type: str
+        description: |-
+          PV suffix of the motor record, e.g. m1
+      DESC:
+        type: str
+        description: |-
+          Description
+        default: ""
+      EGU:
+        type: str
+        description: |-
+          Engineering units: the controller's UnitsName
+        default: mm
+      MRES:
+        type: float
+        description: |-
+          Motor step size (EGU) = 1 / the axis's CountsPerUnit, as read from the
+          controller. No default on purpose: the driver reports positions in
+          counts (program units x CountsPerUnit), and a wrong value is silent.
+      PREC:
+        type: int
+        description: |-
+          Display precision
+        default: 4
+      DIR:
+        type: enum
+        description: |-
+          User direction
+        default: Pos
+        values:
+          Pos: Pos
+          Neg: Neg
+      VELO:
+        type: float
+        description: |-
+          Velocity (EGU/s), sent with each move (LINEAR ... F)
+      VBAS:
+        type: float
+        description: |-
+          Base velocity (EGU/s); the driver does not use it
+        default: 0.0
+      ACCL:
+        type: float
+        description: |-
+          Seconds to velocity; a move sends RAMP RATE VELO/ACCL
+        default: 0.5
+      BDST:
+        type: float
+        description: |-
+          Backlash distance (EGU); 0 = no backlash move
+        default: 0
+      BVEL:
+        type: float
+        description: |-
+          Backlash velocity (EGU/s)
+        default: 0
+      BACC:
+        type: float
+        description: |-
+          Backlash seconds to velocity
+        default: 0.5
+      DHLM:
+        type: float
+        description: |-
+          Dial high limit (EGU), enforced by the record only (the driver never
+          sets the controller's limits)
+        default: 0
+      DLLM:
+        type: float
+        description: |-
+          Dial low limit (EGU); 0 and 0 = no soft limits
+        default: 0
+      DISP:
+        type: bool
+        description: |-
+          Refuse every put to the record's fields (CA, PVA and the iocsh's dbpf)
+          while the driver's status callbacks keep its readbacks live
+        default: false
+
+    databases:
+      - file: EnsembleMotor.db
+        args:
+          P: "{{controller.P}}"
+          M:
+          DESC:
+          PORT: "{{controller}}"
+          ADDR: "{{addr}}"
+          DIR:
+          VELO:
+          VBAS:
+          ACCL:
+          BDST:
+          BVEL:
+          BACC:
+          MRES:
+          PREC:
+          EGU:
+          DHLM:
+          DLLM:
+          DISP: "{{ 1 if DISP else 0 }}"
