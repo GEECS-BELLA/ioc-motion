@@ -85,13 +85,23 @@ entity_models:
         type: bool
         description: |-
           asyn trace (errors, I/O, escaped) on the TCP port from before the
-          first byte: every command and reply on the console
+          first byte: every command and reply
         default: false
+      trace_file:
+        type: str
+        description: |-
+          With trace: the file the trace goes to; empty = the console. A script
+          that parses the trace wants the file: on the console the poller's
+          lines interleave with the iocsh's echo and split commands.
+        default: ""
 
     pre_init:
       - value: |
           drvAsynIPPortConfigure("{{name}}_IP", "{{address}}", 0, 0, 0)
           {% if trace %}
+          {% if trace_file %}
+          asynSetTraceFile("{{name}}_IP", -1, "{{trace_file}}")
+          {% endif %}
           asynSetTraceIOMask("{{name}}_IP", -1, 0x2)
           asynSetTraceMask("{{name}}_IP", -1, 0x9)
           {% endif %}
