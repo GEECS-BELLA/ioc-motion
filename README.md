@@ -9,10 +9,11 @@ pvlogging, **motorSim**) plus:
 | Module | Version | Source | Reuse (decision 10) |
 |---|---|---|---|
 | motorNewport | R1-3 | [epics-motor/motorNewport](https://github.com/epics-motor/motorNewport) (ships no LICENSE file; tier 1 rests on the epics-motor org, geecs-epics device catalogue) | tier 1, dependency, with one build-time patch (below) |
+| motorAerotech | R1-1-1 | [epics-motor/motorAerotech](https://github.com/epics-motor/motorAerotech) (ships no LICENSE file either; `drvEnsembleAsyn.cc` cites a synApps licence it does not ship); no upstream ibek-support recipe, so ours | tier 1, dependency, with one build-time patch (below) |
 
 Drivers for the other families geecs-epics' device catalogue assigns to
-this image (NewFocus Picomotor, Zaber, PI GCS2, Aerotech Ensemble) join it
-when their first device is ported.
+this image (NewFocus Picomotor, Zaber, PI GCS2) join it when their first
+device is ported.
 
 ## Build
 
@@ -118,6 +119,122 @@ optional); until then it lives here.
 geecs-epics `hosts/sim/compose.yaml` (profile `motion`) runs this image
 against the ESP300 fake on the real `esptest1` config, with the fake's log as
 the transcript of what the IOC sent.
+
+## Aerotech Ensemble
+
+`drvEnsembleAsyn` (motorAerotech R1-1-1; master after it changes CI files
+only) is an old-style asyn motor driver: a `motorAxisDrvSET_t` named
+`motorEnsemble` under motor's `drvAsynMotorConfigure`, DTYP `asynMotor`.
+`EnsembleAsynSetup` once, then per controller an IP port, `EnsembleAsynConfig`
+and `drvAsynMotorConfigure`. ASCII over the controller's command socket
+(Socket2, TCP 8000 by default), LF both ways; a reply is `%<value>` (ACK),
+`!` (NAK), `#` (fault) or `$` (timeout) (the driver's `ASCII_*` defines, which
+must match the controller's AsciiCmd* characters). The ibek entities, in
+`ibek-support-geecs/motorAerotech/motorAerotech.ibek.support.yaml`:
+
+- `motorAerotech.EnsembleSetup`: once per IOC, `max_controllers` and the
+  switch below.
+- `motorAerotech.EnsembleController`: the IP port (`<name>_IP`), the
+  controller (`num_axes`, poll periods) and the motor port (`<name>`); `trace`
+  switches the asyn trace on between the IP port and `EnsembleAsynConfig`,
+  because that call talks to the controller at once.
+- `motorAerotech.EnsembleAxis`: one motor record on `EnsembleMotor.db` (added
+  by the patch: the motor record alone, `RSTM` Never, `RTRY` 0, and `DISP`,
+  which the entity sets to 1 by default: every put to a record field but
+  DISP itself is refused (CA, the iocsh's dbpf, and QSRV1's PVA puts, which
+  check it; database links inside the IOC bypass it). An instance that
+  writes sets `DISP: false`.
+
+**Axis numbering.** `EnsembleAsynConfig` probes `GETPARM(@n, AxisName)` for
+n = 0..9 and takes the first `num_axes` that ACK, in order, as driver axes
+0..num_axes-1. A sparse map is not supported: a missing drive shifts every
+later axis down one record, so the instance must check which axis numbers
+answer (geecs-epics' `ens_snapshot.py` prints them). A drive whose stage is
+unplugged still answers and keeps its slot.
+
+**Resolution.** The driver reports positions in counts: the controller's
+program-unit positions times `CountsPerUnit`. `MRES` = 1 / `CountsPerUnit`
+(read from the controller), with `EGU` its `UnitsName`; the entity has no
+default for `MRES` on purpose.
+
+### What the stock driver and record send, and the patch
+
+At `EnsembleAsynConfig` (drvEnsembleAsyn.cc, R1-1-1 line numbers):
+
+1. `NONE` (L944, up to three tries): an invalid command, sent to get any
+   reply (NAK expected). Not a query.
+2. Per axis number until `num_axes` are found: `GETPARM(@n, id)` for
+   AxisName (L959), PositionFeedbackType (L972), CountsPerUnit (L980),
+   HomeOffset (L991), HomeSetup (L996), EndOfTravelLimitSetup (L1002),
+   ReverseMotionDirection (L1012). Queries.
+3. **`RAMP MODE @n RATE`** per axis (L1008): sets the axis's ramp mode. A write.
+4. **`WAIT MODE NOWAIT`** once (L1020): sets the ASCII interpreter's wait
+   mode (per task in Aerotech's later naming, SetupTaskWaitMode; whether the
+   command sockets share that task is not in any public document). A write.
+
+The poller (`EnsemblePoller`, at start, then every idle/moving period) sends
+per axis `AXISSTATUS(@n)` (L715), `PLANESTATUS(0)` (L740), `PFBKPROG(@n)`
+(L772), `PCMDPROG(@n)` (L791), `AXISFAULT(@n)` (L800), `VFBK(@n)` (L836):
+queries. A faulted axis only sets the record's PROBLEM bit and prints the
+fault once per change (L819-L832); nothing is sent to clear it.
+
+The motor record (motor R7-4) adds nothing on the wire at init with this
+driver: `init_record` pushes DHLM/DLLM (motorRecord.cc L716-L717 →
+devMotorAsyn `SET_HIGH/LOW_LIMIT` → `motorAxisSetDouble`, which prints
+"Driver does not set Ensemble's High/Low Limit" and sends nothing, L376-L385);
+`init_controller` writes the encoder ratio (devMotorAsyn.c L189-L190; the
+driver prints "does not support", L364-L368) and, when `RSTM` asks for it,
+the position: **`POSOFFSET SET @n, <pos>`** (L355-L362), a position redefine
+(devMotorAsyn.c L173-L233: Always; NearZero when DVAL is beyond RDBD and the
+controller reads within RDBD of zero, which a restored DVAL, e.g. from
+autosave, produces; Conditional on the same, or whenever RTRY is non-zero,
+RMOD is not Inverse and UEIP or URIP is set). `EnsembleMotor.db` defaults
+`RSTM` to Never and `RTRY` to 0; both are load-bearing. The record never writes CNEN at init (it only mirrors the drive's
+enable bit, motorRecord.cc L3540-L3548).
+
+Write paths that open only on a put (an instance that must not change the
+controller refuses them: access security, `DISP`): CNEN (L429-L466:
+**`FAULTACK @n`** if a fault is latched, **`ENABLE/DISABLE @n`**,
+**`WAIT MODE NOWAIT`**), a move (L517-L531: **`ABS`/`INC`**, **`RAMP RATE`**,
+**`LINEAR @n <pos> F<vel>`**), a jog (L621-L627: **`SETPARM`**, **`RAMP RATE`**,
+**`FREERUN`**), a home (L567-L594: **`SETPARM`** x2, **`IGLOBAL(32/33) =`**,
+**`PROGRAM RUN 5, "HomeAsync.bcx"`**), STOP (L666: **`ABORT @n`**), SET mode
+and, in Use mode, a put to MRES, ERES or UEIP (motorRecord.cc L1937-L1990,
+`load_pos`) (**`POSOFFSET SET`**). The driver never sends `ACKNOWLEDGEALL`.
+
+`aerotech-ensemble-read-only-init.patch` (applied by
+`motorAerotech.install.yml` on upstream R1-1-1; `drvEnsembleAsyn.cc`,
+`devAerotech.dbd`, `Db/Makefile`, and the new `Db/EnsembleMotor.db`) adds one
+iocsh variable, upstream behaviour by default:
+
+| Variable | 1 (upstream) | 0 |
+|---|---|---|
+| `EnsembleInitWrites` | probe with `NONE`; `RAMP MODE @n RATE` per axis and `WAIT MODE NOWAIT` at `EnsembleAsynConfig` | probe with `PLANESTATUS(0)` (a query the poller sends anyway); the two mode commands go before every move, jog and home instead (`sendMotionModes`), and the motion command is not sent unless both are acknowledged (`%`): without WAIT MODE NOWAIT the interpreter blocks during a move (motorAerotech issue #6: timeouts, a frozen position, a motor that cannot be stopped). Sending them each time also covers a controller restarted after the IOC |
+
+The `EnsembleSetup` entity renders it from `init_writes`, which **defaults
+to false**: a boot and the idle poll then send the controller queries only.
+The `variable()` line in `devAerotech.dbd` is what makes `var` work (without
+it iocsh prints "No known var" and the stock behaviour runs). Checked against
+geecs-epics' Ensemble fake (`sim/ensemble_sim.py`, which logs every
+non-query as `WRITE`): with the switch at 0 no `WRITE` at init or in the
+poll; at 1 the fake logs `NONE`, three `RAMP MODE`s and `WAIT MODE NOWAIT`
+(geecs-epics `services/enstest1`). Not yet checked against a controller.
+Worth proposing upstream (a query probe; mode commands with each motion command).
+
+### Known gaps in the upstream driver (R1-1-1), from reading it
+
+- **No sparse axis map** (above): the driver index is the answer order.
+- `motorAxisOpen` bounds-checks `card > numEnsembleControllers` (L306) and
+  `axis > numAxes` (L308), one past each array; a record with ADDR =
+  num_axes reads past it.
+- If fewer than `num_axes` drives answer, the trailing driver axes have no
+  controller: their records load but never update.
+- If the probe gets no reply, `EnsembleAsynConfig` returns before the axes
+  and the poller exist; the records then sit with no driver behind them
+  until the IOC is restarted with the controller reachable.
+- The controller closes a socket idle longer than its `Socket2Timeout`; the
+  idle poll (a period below it) is what keeps the socket open
+  (`docs/README_Ensemble.md`).
 
 ## Template Info
 This repository was generated by
