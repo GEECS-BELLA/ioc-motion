@@ -245,7 +245,7 @@ delay, plus a `setClosedLoop` that refuses false for `keep_on`).
 | `power_policy` | Before a move, jog or home | After it | CNEN puts |
 |---|---|---|---|
 | `leave` (default) | nothing (a move on a disabled axis faults at the controller, `#`, as upstream) | nothing | as upstream |
-| `on_for_move` | if `AXISSTATUS` reads disabled: `ENABLE @n`, which must be acknowledged (`%`), then `onDelay`, then `AXISSTATUS` must read enabled; otherwise no motion command, PROBLEM set. Never `FAULTACK` | done (DMOV) held at 0; `offDelay` after the end of motion (the poll that first sees it, moving poll period), `DISABLE @n`, which must be acknowledged, read back disabled (`AXISSTATUS` bit 0, `axis_enabled`, drvEnsembleAsyn.h) and read disabled again by the next poll; only then done, with CNEN 0 | as upstream; a CNEN put ends a pending disable (the put decides) |
+| `on_for_move` | if `AXISSTATUS` reads disabled: `ENABLE @n`, which must be acknowledged (`%`), then `onDelay`, then `AXISSTATUS` must read enabled; otherwise no motion command, PROBLEM set. Never `FAULTACK` | done (DMOV) held at 0; `offDelay` after the end of motion (the poll that first sees it, moving poll period), `DISABLE @n`, which must be acknowledged, read back disabled (`AXISSTATUS` bit 0, `axis_enabled`, drvEnsembleAsyn.h) and read disabled again by the next poll; only then done, with CNEN 0 | as upstream on the wire, then `AXISSTATUS` read back (upstream checks neither reply): PROBLEM if the drive did not follow; a CNEN put ends a pending disable (the put decides) |
 | `keep_on` | the same enable | nothing | **CNEN 0 refused**: nothing sent, PROBLEM set, CNEN reads back the drive |
 
 Then the mode commands (`RAMP MODE`, `WAIT MODE NOWAIT`, both acknowledged or
@@ -258,7 +258,9 @@ CNEN readback alone proves nothing; this path does not trust a reply): a scan wa
 on DMOV does not fire with the axis enabled. The exceptions, where the motor
 record ends the move itself (PROBLEM or a limit switch, motorRecord.cc
 L3741-L3746): a controller fault during the motion is disabled at once, in the
-poll that sees it, before DMOV; an `AXISFAULT` read that is not acknowledged,
+poll that sees it, before DMOV (one `DISABLE`, acknowledged and read back, but
+no confirming poll and no retry: PROBLEM ends the move anyway); an `AXISFAULT`
+read that is not acknowledged,
 or a limit switch reached without a controller fault, ends DMOV while the axis
 is still held, and the disable follows `offDelay` later. Details:
 
@@ -282,8 +284,12 @@ is still held, and the disable follows `offDelay` later. Details:
   done-and-disabled on a reply alone. Likewise an `ENABLE` acknowledged with the
   drive still reading disabled after `onDelay` sends no motion command (PROBLEM;
   under `on_for_move` a `DISABLE` follows at once).
+- **Status unreadable while held**: ten polls in a row without a clean
+  `AXISSTATUS` end the hold with done, PROBLEM and CommError (an alarm, not a
+  DMOV 0 forever).
 - **PROBLEM** from a refusal or failure is sticky until the next accepted
-  motion or CNEN put (the poll's own fault check would otherwise clear it).
+  motion or a CNEN put the drive is read to have followed (the poll's own
+  fault check would otherwise clear it).
 - **Done is plane-wide** (`PLANESTATUS(0)`, upstream): another axis moving in
   plane 0 delays this axis's `offDelay` and its DMOV.
 - **New motion during a move or its off window**: the record still reads not

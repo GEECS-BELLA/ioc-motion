@@ -66,7 +66,7 @@ index 3619889..dc7711a 100644
  # Aerotech A3200 asynMotor support
  driver(motorA3200)
 diff --git a/aerotechApp/src/drvEnsembleAsyn.cc b/aerotechApp/src/drvEnsembleAsyn.cc
-index 9e4d783..73ebe93 100644
+index 9e4d783..286efa1 100644
 --- a/aerotechApp/src/drvEnsembleAsyn.cc
 +++ b/aerotechApp/src/drvEnsembleAsyn.cc
 @@ -91,6 +91,8 @@ in file LICENSE that is included with this distribution.
@@ -78,7 +78,7 @@ index 9e4d783..73ebe93 100644
  
  #include "drvSup.h"
  #define DEFINE_MOTOR_PROTOTYPES 1
-@@ -162,6 +164,16 @@ typedef struct motorAxisHandle
+@@ -162,6 +164,17 @@ typedef struct motorAxisHandle
      Switch_Level swconfig;
      int lastFault;
      bool ReverseDirec;
@@ -91,11 +91,12 @@ index 9e4d783..73ebe93 100644
 +    epicsTimeStamp powerDoneTime;
 +    int powerOffTries;             /* DISABLE attempts not confirmed */
 +    int powerOffConfirm;           /* DISABLE acknowledged and read back; done once the next poll reads it too */
++    int powerPollFails;            /* consecutive polls with no clean AXISSTATUS while held */
 +    int powerError;                /* sticky: the policy refused or failed; ORed into motorAxisProblem */
  } motorAxis;
  
  typedef struct
-@@ -211,6 +223,236 @@ the Ensemble parameters specified */
+@@ -211,6 +224,258 @@ the Ensemble parameters specified */
  #define ASCII_TIMEOUT_CHAR  '$'   /* AsciiCmdTimeoutChar */
  
  static motorEnsemble_t drv = {NULL, NULL, motorEnsembleLogMsg, 0, {0, 0}};
@@ -151,7 +152,10 @@ index 9e4d783..73ebe93 100644
 + *                offDelay after the end of motion, then DISABLE (acknowledged,
 + *                read disabled, and read disabled again by the next poll) and
 + *                only then done; otherwise, after POWER_OFF_TRIES, done with
-+ *                PROBLEM (never done-and-disabled on a reply alone).
++ *                PROBLEM (never done-and-disabled on a reply alone). A fault
++ *                during the motion is disabled at once, one try and no
++ *                confirming poll (PROBLEM ends the record's move anyway).
++ *                A CNEN put on a non-leave axis is read back from AXISSTATUS.
 + *   keep_on      the same ENABLE before motion; CNEN 0 is refused (nothing
 + *                sent, motorAxisProblem set); the driver never sends DISABLE.
 + * Boot and the idle poll are unchanged (queries only) under every policy. A
@@ -161,6 +165,7 @@ index 9e4d783..73ebe93 100644
 +#define POWER_ON_FOR_MOVE  1
 +#define POWER_KEEP_ON      2
 +#define POWER_OFF_TRIES    3   /* DISABLE attempts (one per poll) before giving up with PROBLEM */
++#define POWER_POLL_FAILS  10   /* held polls with no clean AXISSTATUS before giving up with PROBLEM */
 +
 +static const char *powerPolicyName(int policy)
 +{
@@ -267,6 +272,7 @@ index 9e4d783..73ebe93 100644
 +    pAxis->powerOffArmed = 0;
 +    pAxis->powerOffTries = 0;
 +    pAxis->powerOffConfirm = 0;
++    pAxis->powerPollFails = 0;
 +    motorParam->setInteger(pAxis->params, motorAxisDone, 0);
 +    motorParam->callCallback(pAxis->params);
 +    epicsEventSignal(pAxis->pController->pollEventId);
@@ -281,6 +287,23 @@ index 9e4d783..73ebe93 100644
 +    pAxis->powerOffArmed = 0;
 +    pAxis->powerError = 1;
 +    return false;
++}
++
++/* A held axis whose AXISSTATUS poll is not clean: after POWER_POLL_FAILS in a row,
++ * done with PROBLEM and CommError (an alarm, not a silent DMOV 0 forever). */
++static void powerPollFailed(AXIS_HDL pAxis)
++{
++    if (++pAxis->powerPollFails < POWER_POLL_FAILS)
++        return;
++    PRINT(pAxis->logParam, TERROR, "drvEnsembleAsyn: power policy on_for_move: axis @%d status unreadable for %d polls while held\n",
++          pAxis->axis, POWER_POLL_FAILS);
++    pAxis->powerPollFails = 0;
++    pAxis->powerOffConfirm = 0;
++    powerGiveUp(pAxis);
++    motorParam->setInteger(pAxis->params, motorAxisCommError, 1);
++    motorParam->setInteger(pAxis->params, motorAxisProblem, 1);
++    motorParam->setInteger(pAxis->params, motorAxisDone, 1);
++    motorParam->callCallback(pAxis->params);
 +}
 +
 +/* In the poller, for an axis with powerHold: true while done must stay 0. */
@@ -332,7 +355,7 @@ index 9e4d783..73ebe93 100644
  static int numEnsembleControllers;
  /* Pointer to array of controller structures */
  static EnsembleController *pEnsembleController=NULL;
-@@ -224,6 +466,8 @@ static void motorAxisReportAxis(AXIS_HDL pAxis, int level)
+@@ -224,6 +489,8 @@ static void motorAxisReportAxis(AXIS_HDL pAxis, int level)
          printf("   home preset: %f\n", pAxis->homePreset);
          printf("   step size:   %f\n", pAxis->stepSize);
          printf("   max digits:  %d\n", pAxis->maxDigits);
@@ -341,7 +364,7 @@ index 9e4d783..73ebe93 100644
      }
  }
  
-@@ -427,6 +671,20 @@ static int motorAxisSetInteger(AXIS_HDL pAxis, motorAxisParam_t function, int va
+@@ -427,6 +694,19 @@ static int motorAxisSetInteger(AXIS_HDL pAxis, motorAxisParam_t function, int va
      switch (function)
      {
      case motorAxisClosedLoop:
@@ -352,17 +375,38 @@ index 9e4d783..73ebe93 100644
 +            break;                         /* ret_status MOTOR_AXIS_ERROR */
 +        }
 +        if (pAxis->powerPolicy != POWER_LEAVE)
-+        {   /* an explicit CNEN put ends a pending on_for_move disable: the put decides */
++        {   /* an explicit CNEN put ends a pending on_for_move disable: the put decides
++             * (its result is read back below; a PROBLEM stays until a confirmed outcome) */
 +            pAxis->powerHold = 0;
 +            pAxis->powerOffArmed = 0;
 +            pAxis->powerOffConfirm = 0;
-+            if (pAxis->powerError)
-+                powerSetError(pAxis, 0);
 +        }
          if (value == 0)
          {
              int TravelLimitFaultMask = (1 << AXISFAULTBITS_CwEndOfTravelLimitFaultBit) | (1 << AXISFAULTBITS_CcwEndOfTravelLimitFaultBit);
-@@ -479,7 +737,7 @@ static int motorAxisSetInteger(AXIS_HDL pAxis, motorAxisParam_t function, int va
+@@ -464,6 +744,21 @@ static int motorAxisSetInteger(AXIS_HDL pAxis, motorAxisParam_t function, int va
+         /* Prevent ASCII interpreter from blocking during MOVEABS/INC commands. */
+         ret_status = sendAndReceive(pAxis->pController, (char *) "WAIT MODE NOWAIT", inputBuff, sizeof(inputBuff));
+ 
++        if (pAxis->powerPolicy != POWER_LEAVE)
++        {   /* power policy: upstream checks neither reply; the drive says what happened */
++            int enabled = powerAxisEnabled(pAxis);
++            if (enabled != (value ? 1 : 0))
++            {
++                PRINT(pAxis->logParam, TERROR, "drvEnsembleAsyn: power policy: CNEN %d on axis @%d: the drive reads %s\n",
++                      value, pAxis->axis, enabled < 0 ? "nothing" : enabled ? "enabled" : "disabled");
++                powerSetError(pAxis, 1);
++            }
++            else if (pAxis->powerError)
++                powerSetError(pAxis, 0);
++            if (enabled >= 0)
++                motorParam->setInteger(pAxis->params, motorAxisPowerOn, enabled);
++        }
++
+         break;
+     default:
+         PRINT(pAxis->logParam, TERROR, "motorAxisSetInteger: unknown function %d\n", function);
+@@ -479,7 +774,7 @@ static int motorAxisSetInteger(AXIS_HDL pAxis, motorAxisParam_t function, int va
  }
  
  
@@ -371,7 +415,7 @@ index 9e4d783..73ebe93 100644
                           double min_velocity, double max_velocity, double acceleration)
  {
      int ret_status;
-@@ -491,6 +749,8 @@ static int motorAxisMove(AXIS_HDL pAxis, double position, int relative,
+@@ -491,6 +786,8 @@ static int motorAxisMove(AXIS_HDL pAxis, double position, int relative,
      if (pAxis == NULL || pAxis->pController == NULL)
          return (MOTOR_AXIS_ERROR);
  
@@ -380,7 +424,7 @@ index 9e4d783..73ebe93 100644
      axis = pAxis->axis;
      maxDigits = pAxis->maxDigits;
  
-@@ -547,7 +807,7 @@ static int motorAxisMove(AXIS_HDL pAxis, double position, int relative,
+@@ -547,7 +844,7 @@ static int motorAxisMove(AXIS_HDL pAxis, double position, int relative,
      return (MOTOR_AXIS_OK);
  }
  
@@ -389,7 +433,7 @@ index 9e4d783..73ebe93 100644
  {
      int ret_status;
      char inputBuff[BUFFER_SIZE], outputBuff[BUFFER_SIZE];
-@@ -557,6 +817,8 @@ static int motorAxisHome(AXIS_HDL pAxis, double min_velocity, double max_velocit
+@@ -557,6 +854,8 @@ static int motorAxisHome(AXIS_HDL pAxis, double min_velocity, double max_velocit
      if (pAxis == NULL || pAxis->pController == NULL)
          return (MOTOR_AXIS_ERROR);
  
@@ -398,7 +442,7 @@ index 9e4d783..73ebe93 100644
      axis = pAxis->axis;
      
      PRINT(pAxis->logParam, FLOW, "motorAxisHome: set card %d, axis %d to home, forwards = %d\n",
-@@ -610,7 +872,7 @@ static int motorAxisHome(AXIS_HDL pAxis, double min_velocity, double max_velocit
+@@ -610,7 +909,7 @@ static int motorAxisHome(AXIS_HDL pAxis, double min_velocity, double max_velocit
  }
  
  
@@ -407,7 +451,7 @@ index 9e4d783..73ebe93 100644
  {
      char inputBuff[BUFFER_SIZE], outputBuff[BUFFER_SIZE];
      int ret_status;
-@@ -618,6 +880,8 @@ static int motorAxisVelocityMove(AXIS_HDL pAxis, double min_velocity, double vel
+@@ -618,6 +917,8 @@ static int motorAxisVelocityMove(AXIS_HDL pAxis, double min_velocity, double vel
      if (pAxis == NULL || pAxis->pController == NULL)
          return(MOTOR_AXIS_ERROR);
  
@@ -416,7 +460,7 @@ index 9e4d783..73ebe93 100644
      sprintf(outputBuff, "SETPARM @%d, %d, %.*f", pAxis->axis, PARAMETERID_AbortDecelRate,
              pAxis->maxDigits, acceleration * fabs(pAxis->stepSize));
      ret_status = sendAndReceive(pAxis->pController, outputBuff, inputBuff, sizeof(inputBuff));
-@@ -641,6 +905,63 @@ static int motorAxisVelocityMove(AXIS_HDL pAxis, double min_velocity, double vel
+@@ -641,6 +942,63 @@ static int motorAxisVelocityMove(AXIS_HDL pAxis, double min_velocity, double vel
      return (ret_status);
  }
  
@@ -480,7 +524,25 @@ index 9e4d783..73ebe93 100644
  static int motorAxisProfileMove(AXIS_HDL pAxis, int npoints, double positions[], double times[], int relative, int trigger)
  {
      return (MOTOR_AXIS_ERROR);
-@@ -732,7 +1053,7 @@ static void EnsemblePoller(EnsembleController *pController)
+@@ -717,6 +1075,8 @@ static void EnsemblePoller(EnsembleController *pController)
+             if (comStatus != asynSuccess || strlen(inputBuff) <= 1)
+             {
+                 motorParam->setInteger(pAxis->params, motorAxisCommError, 1);
++                if (pAxis->powerHold)
++                    powerPollFailed(pAxis);
+                 epicsMutexUnlock(pAxis->mutexId);
+                 continue;
+             }
+@@ -726,13 +1086,16 @@ static void EnsemblePoller(EnsembleController *pController)
+                 axisStatus.All = 0;
+                 if (inputBuff[0] != ASCII_ACK_CHAR)
+                 {
++                    if (pAxis->powerHold)
++                        powerPollFailed(pAxis);
+                     epicsMutexUnlock(pAxis->mutexId);
+                     continue;
+                 }
++                pAxis->powerPollFails = 0;
                  else
                  {
                      int CW_sw_active, CCW_sw_active;
@@ -489,7 +551,7 @@ index 9e4d783..73ebe93 100644
  
                      motorParam->setInteger(params, motorAxisCommError, 0);
                      axisStatus.All = atoi(&inputBuff[1]);
-@@ -740,8 +1061,10 @@ static void EnsemblePoller(EnsembleController *pController)
+@@ -740,8 +1103,10 @@ static void EnsemblePoller(EnsembleController *pController)
                      comStatus = sendAndReceive(pController, (char *) "PLANESTATUS(0)", inputBuff, sizeof(inputBuff));
                      move_active = (0x01 & atoi(&inputBuff[1])) ? true : false;
                      move_active |= axisStatus.Bits.move_active;
@@ -502,7 +564,7 @@ index 9e4d783..73ebe93 100644
                          anyMoving = true;
  
                      motorParam->setInteger(pAxis->params, motorAxisPowerOn, axisStatus.Bits.axis_enabled);
-@@ -830,9 +1153,27 @@ static void EnsemblePoller(EnsembleController *pController)
+@@ -830,9 +1195,27 @@ static void EnsemblePoller(EnsembleController *pController)
                          motorParam->setInteger(pAxis->params, motorAxisProblem, 1);
                          PRINT(pAxis->logParam, TERROR, "EnsemblePoller: controller fault on axis=%d fault=0x%X\n", itera, axisFault);
                      }
@@ -530,7 +592,7 @@ index 9e4d783..73ebe93 100644
              sprintf(outputBuff, "VFBK(@%d)", pAxis->axis);
              comStatus = sendAndReceive(pController, outputBuff, inputBuff, sizeof(inputBuff));
              if (comStatus != asynSuccess)
-@@ -941,7 +1282,7 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -941,7 +1324,7 @@ int EnsembleAsynConfig(int card,             /* Controller number */
      {
          /* we only care if we get a response
          so we don't need to send a valid command */
@@ -539,7 +601,7 @@ index 9e4d783..73ebe93 100644
          status = sendAndReceive(pController, outputBuff, inputBuff, sizeof(inputBuff));
  
          retry++;
-@@ -1004,9 +1345,12 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -1004,9 +1387,12 @@ int EnsembleAsynConfig(int card,             /* Controller number */
              if (inputBuff[0] == ASCII_ACK_CHAR)
                  pAxis->swconfig.All = atoi(&inputBuff[1]);
  
@@ -555,7 +617,7 @@ index 9e4d783..73ebe93 100644
  
              /* Get Reverse Direction indicator. */
              sprintf(outputBuff, getparamstr, axis, PARAMETERID_ReverseMotionDirection);
-@@ -1016,8 +1360,10 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -1016,8 +1402,10 @@ int EnsembleAsynConfig(int card,             /* Controller number */
          }
      }
  
@@ -568,7 +630,7 @@ index 9e4d783..73ebe93 100644
  
      pController->pollEventId = epicsEventMustCreate(epicsEventEmpty);
  
-@@ -1029,6 +1375,95 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -1029,6 +1417,95 @@ int EnsembleAsynConfig(int card,             /* Controller number */
      return (MOTOR_AXIS_OK);
  }
  
