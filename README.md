@@ -307,21 +307,29 @@ the `EnsembleAxis` entity renders **`UEIP` Yes by default**, so `RBV` is the
 encoder: `ERES` 0 becomes `MRES` at init (motorRecord.cc L692-L695), the
 encoder ratio is 1 (the driver ignores the record's ratio push, "does not
 support setting encoder ratio", and needs none) and the scaling is exact. The
-record falls back to the commanded position on an axis whose drive reports
-no feedback device (`PositionFeedbackType` 0: no `EA_PRESENT`, motorRecord.cc
-L3671-L3675). Why: a disabled servo axis drifts and its command does not
+record falls back to the commanded position, for good, on an axis whose
+status shows no feedback device when the record first reads it
+(`PositionFeedbackType` 0, or a status not yet delivered at record init: no
+`EA_PRESENT`, motorRecord.cc L3671-L3675); geecs-epics' enstest1 harness
+reads `UEIP` back and refuses to run without Yes. `ATHM` then follows the
+encoder's home bit, which this driver never sets (it reads 0). A position
+reply that is not an ACK (`PFBKPROG`, `PCMDPROG`) leaves the position as it
+was and sets CommError (the patch; upstream set the encoder position to 0 and
+read the command unchecked). Why: a disabled servo axis drifts and its command does not
 (U_CompAerotech's separation axis, 2026-10-29: 0.14 to 0.23 um from the
 command right after a `DISABLE`, about 0.2 um more over 15 minutes), so the
 commanded readback hides where the stage is. With `RTRY` 0 a move is still
 absolute (`LINEAR` to the target; relative moves need RTRY non-zero and an
 encoder, motorRecord.cc L2289), and nothing new goes on the wire.
-**`RDBD`** (entity parameter, default 0: the record raises it to |MRES|) is
-the in-position band. With `RTRY` 0 the record neither retries nor sets
+**`RDBD`** (entity parameter, **no default**: below |MRES| the record raises
+it to |MRES|) is the in-position band. With `RTRY` 0 the record neither retries nor sets
 `MISS` (motorRecord.cc `maybeRetry`, L1054-L1056: `MISS` is set only once
 `RTRY` retries ran out) and raises no alarm on a position outside it; a
 position outside the band shows in `RBV` and `DIFF`. It also sets the
 new-target monitor's deadband, `NTMF` x (|`BDST`| + `RDBD`), 2 x `RDBD` by
-default (next section).
+default (next section): with the encoder as RBV an overshoot or settle beyond
+it during a move makes the record send a STOP (`ABORT`), under every policy,
+so `RDBD` must sit well above the settle jitter.
 
 ### What the stock driver and record send, and the patch
 
@@ -439,9 +447,13 @@ is still held, and the disable follows `offDelay` later. Details:
   poller has seen its end, the axis held for its `DISABLE`, in the off window
   or after the `DISABLE`) sends nothing when a fresh `AXISSTATUS` and
   `PLANESTATUS(0)` read no motion and no home cycle (`powerStopNotNeeded`, a
-  console line); any motion, or a reply that is not clean, sends the `ABORT`.
+  console line); any motion, a reply that is not clean, or a held home
+  (HomeAsync.bcx's several moves) sends the `ABORT`. It trusts the status bits
+  as the poller's end of motion does: a motion the controller acknowledged but
+  does not yet show would also be taken for its end by the poller (the
+  `offDelay` floor guards that).
   Why: the hold keeps DMOV 0, so the record still sees MOVN 1 and runs its
-  new-target monitor (motorRecord.cc `process()`, L1301-L1340, NTM Yes by
+  new-target monitor (motorRecord.cc `process()`, L1325-L1340, NTM Yes by
   default): a readback past the target by more than `NTMF` x (|`BDST`| +
   `RDBD`) against the commanded direction is a "wrong direction" to it (it
   prints `<record>:tdir = <n>`) and it asks for a STOP. On U_CompAerotech

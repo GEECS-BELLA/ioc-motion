@@ -207,7 +207,10 @@ entity_models:
           In-position band (EGU). With RTRY 0 (no retries) it neither retries
           nor sets MISS; the record widens its new-target monitor's deadband to
           NTMF x (BDST + RDBD) with it, and raises a value below |MRES| to |MRES|.
-        default: 0
+          No default on purpose: with RBV from the encoder (UEIP) the monitor
+          sends a STOP (ABORT) on any overshoot or settle beyond 2 x RDBD
+          during a move, so RDBD must be well above the axis's settle jitter
+          (the GEECS DB tolerance is the usual choice).
       UEIP:
         type: bool
         description: |-
