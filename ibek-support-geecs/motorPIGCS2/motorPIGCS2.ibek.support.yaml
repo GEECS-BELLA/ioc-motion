@@ -1,0 +1,247 @@
+# yaml-language-server: $schema=https://github.com/epics-containers/ibek/releases/download/3.0.1/ibek.support.schema.json
+
+# motorPIGCS2 R1-3-1 with ioc-motion's patch (motorPIGCS2-geecs.patch): PI's
+# old "Hexapod" controller (GCS-1, the DOS controller of the M-8x0 hexapods)
+# as six motor records. README "PI hexapod (motorPIGCS2)".
+
+module: motorPIGCS2
+
+entity_models:
+  # One controller object per serial line: the driver identifies the
+  # controller by *IDN? at creation and, for an identity containing "hexapod",
+  # runs its GCS-1 hexapod class with the axes X Y Z U V W (driver axes 0-5).
+  - name: PIHexapodController
+    description: |-
+      PI's old "Hexapod" controller over a geecsSerial.Port (57600 8N1, no
+      handshake, LF; the driver sets the asyn port's terminators itself).
+      Creation sends *IDN?, VEL?, #4, #3, SPI? RST, then per axis VEL?,
+      POS? and #4; the switches below decide the rest (README).
+    parameters:
+      name:
+        type: id
+        description: |-
+          The motor driver's asyn port name (the axes' PORT)
+      port:
+        type: object
+        description: |-
+          The geecsSerial.Port this controller is on
+      P:
+        type: str
+        description: |-
+          PV prefix of this controller's records, with its trailing colon
+      moving_poll_ms:
+        type: int
+        description: |-
+          Poll period while the platform moves, ms. Each poll is one #5 for
+          the controller and POS? per axis (with pos_with_char3 false;
+          upstream would read #3 instead while moving).
+        default: 500
+      idle_poll_ms:
+        type: int
+        description: |-
+          Poll period while idle, ms; 0 = none
+        default: 2000
+      init_servo:
+        type: bool
+        description: |-
+          Upstream: SVO <axis> 1 for every axis at init (a write at every IOC
+          start). false reads SVO? <axis> instead and reports what it finds.
+          Applies to every PI hexapod controller in the IOC.
+        default: false
+      home_allowed:
+        type: bool
+        description: |-
+          Upstream: the record's HOMF/HOMR send INI X (the hexapod's reference
+          run, every axis). false refuses them with an error and sends nothing.
+          Applies to every PI hexapod controller in the IOC.
+        default: false
+      vmo_check:
+        type: bool
+        description: |-
+          true: before every MOV (single axis or deferred six-axis) the
+          driver asks VMO with the same targets and refuses the move, with an
+          error and nothing sent, when the controller answers 1 (the
+          hexapod's workspace is coupled; the records' limits are not it).
+          false is upstream: MOV straight away. Applies to every PI hexapod
+          controller in the IOC.
+        default: true
+      send_velocity:
+        type: bool
+        description: |-
+          Upstream: VEL <axis> <v> (the record's VELO) before every move.
+          false sends nothing: the platform's velocity stays the controller's
+          (the hexapod has one velocity for every axis). Applies to every PI
+          hexapod controller in the IOC.
+        default: false
+      pos_with_char3:
+        type: bool
+        description: |-
+          Upstream: probe #3 at init and read positions with it while moving.
+          On a controller that answers #3 with six lines, upstream's
+          single-byte read re-sends the byte for every continuation line
+          (~26 round trips under the port lock per read, only the first
+          axis parsed). false never sends #3: positions while moving come
+          from POS? <axis>. Applies to every PI hexapod controller in the IOC.
+        default: false
+      jog_allowed:
+        type: bool
+        description: |-
+          Upstream: the record's JOGF/JOGR send MOV <axis> <travel limit>
+          with no VMO. false refuses a jog with an error and sends nothing.
+          Applies to every PI hexapod controller in the IOC.
+        default: false
+      set_position_allowed:
+        type: bool
+        description: |-
+          Upstream: the record's SET (position redefine) sends RON <axis> 0,
+          POS <axis> <v>, RON <axis> 1. false refuses it with an error and
+          sends nothing. Applies to every PI hexapod controller in the IOC.
+        default: false
+
+    pre_init:
+      - when: first
+        value: |
+          # ioc-motion's PI hexapod patch (README): upstream behaviour is 1, 1, 0, 1, 1, 1, 1
+          var PIHexapodInitServo {{ 1 if init_servo else 0 }}
+          var PIHexapodHomeAllowed {{ 1 if home_allowed else 0 }}
+          var PIHexapodVmoCheck {{ 1 if vmo_check else 0 }}
+          var PIHexapodSendVel {{ 1 if send_velocity else 0 }}
+          var PIHexapodPosWithChar3 {{ 1 if pos_with_char3 else 0 }}
+          var PIHexapodJogAllowed {{ 1 if jog_allowed else 0 }}
+          var PIHexapodSetPosAllowed {{ 1 if set_position_allowed else 0 }}
+      - value: |
+          # PI_GCS2_CreateController(portName, asynPort, numAxes, priority, stackSize, movingPollMs, idlePollMs)
+          PI_GCS2_CreateController("{{name}}", "{{port.name}}", 6, 0, 0, {{moving_poll_ms}}, {{idle_poll_ms}})
+
+    databases:
+      # DEFER (deferred moves: the six-axis set as one MOV), the pivot
+      # readbacks RBPIVOT_X/Y/Z (SPI? RST at init) and LAST_ERR.
+      - file: PIHexapodCtrl.db
+        args:
+          P: "{{P}}"
+          PORT: "{{name}}"
+
+  - name: PIHexapodAxis
+    description: |-
+      One hexapod axis as a motor record ($(P)$(M)) on PIHexapodMotor.db
+      (RSTM Never, RTRY 0, DISP). MRES is the driver's fixed 1e-4 (its counts
+      per unit), in the axis's unit: mm for X Y Z, degrees for U V W.
+    parameters:
+      controller:
+        type: object
+        description: |-
+          The PIHexapodController this axis is on
+      axis:
+        type: enum
+        description: |-
+          The GCS axis
+        values:
+          X: X
+          Y: Y
+          Z: Z
+          U: U
+          V: V
+          W: W
+      M:
+        type: str
+        description: |-
+          PV suffix of the motor record, e.g. X
+      DESC:
+        type: str
+        description: |-
+          Description
+        default: ""
+      EGU:
+        type: str
+        description: |-
+          Engineering units: mm for X Y Z, deg for U V W
+        default: mm
+      PREC:
+        type: int
+        description: |-
+          Display precision
+        default: 4
+      DIR:
+        type: enum
+        description: |-
+          User direction
+        default: Pos
+        values:
+          Pos: Pos
+          Neg: Neg
+      VELO:
+        type: float
+        description: |-
+          Velocity (EGU/s) for the record's own timing only: the driver sends
+          no velocity to this controller (the platform's VEL stays the
+          controller's)
+        default: 0.5
+      VBAS:
+        type: float
+        description: |-
+          Base velocity (EGU/s)
+        default: 0.0
+      ACCL:
+        type: float
+        description: |-
+          Seconds to velocity, for the record's own timing only
+        default: 0.1
+      BDST:
+        type: float
+        description: |-
+          The record's backlash distance (EGU); 0 = none
+        default: 0
+      BVEL:
+        type: float
+        description: |-
+          Backlash velocity (EGU/s)
+        default: 0.1
+      BACC:
+        type: float
+        description: |-
+          Backlash seconds to velocity
+        default: 0.25
+      DHLM:
+        type: float
+        description: |-
+          Dial high limit (EGU), enforced by the record; the controller's VMO
+          is the real (coupled) limit
+        default: 0
+      DLLM:
+        type: float
+        description: |-
+          Dial low limit (EGU); 0 and 0 = no record limits
+        default: 0
+      RDBD:
+        type: float
+        description: |-
+          Retry deadband (EGU); with RTRY 0 only DMOV's "at position" uses it
+        default: 0.001
+      DISP:
+        type: bool
+        description: |-
+          Disable puts to the record (DISP 1) at boot; readbacks stay live
+        default: true
+
+    databases:
+      - file: PIHexapodMotor.db
+        args:
+          P: "{{controller.P}}"
+          M:
+          DESC:
+          PORT: "{{controller.name}}"
+          ADDR: "{{ {'X': 0, 'Y': 1, 'Z': 2, 'U': 3, 'V': 4, 'W': 5}[axis] }}"
+          DIR:
+          VELO:
+          VBAS:
+          ACCL:
+          BDST:
+          BVEL:
+          BACC:
+          MRES: "0.0001"
+          PREC:
+          EGU:
+          DHLM:
+          DLLM:
+          RDBD:
+          DISP: "{{ 1 if DISP else 0 }}"
