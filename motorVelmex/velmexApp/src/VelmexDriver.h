@@ -29,6 +29,7 @@
 #define VELMEX_SETTLE_COUNTS 2.0     /* readout readings this close count as unchanged */
 #define VELMEX_SETTLE_S 1.5          /* a move is done when the readout has been unchanged this long after the VXM idled */
 #define VELMEX_SETTLE_MAX_S 10.0     /* ... or this long after the VXM idled: done anyway, with a message */
+#define VELMEX_POLL_FAILURES 3       /* consecutive failed polls before the record sees a problem (a single timeout is a comm error only) */
 #define VELMEX_VRO_TIMEOUT 1.0
 
 /* Controller-wide readings beyond the motor record's (VelmexController.db) */
@@ -63,6 +64,7 @@ private:
   int limitsActiveLow_;    /**< 1: a limit input reads 0 when activated (the manual); 0: inverted */
   int moving_;             /**< This axis's program is running */
   int encoderOk_;          /**< The readout answered on the last poll: a reference exists */
+  int failures_;           /**< Consecutive polls whose X or readout read failed */
   int settling_;           /**< 1 while the VXM is idle and the readout has not settled yet */
   double settleValue_;     /**< The readout value (counts) the settle clock is measuring from */
   int settleHave_;         /**< settleValue_ holds a reading of this settle (the first poll may have none) */
@@ -103,7 +105,9 @@ private:
   char vxmStatus_;               /**< The last V reply: R, B, J, b; '?' none yet */
   char vroStatus_;               /**< The readout's last V reply: D, P, S, F; '?' none yet */
   unsigned char limitByte_;      /**< The last ? reply */
-  asynStatus pollStatus_;        /**< The VXM part of the current poll (V, ?) */
+  int limitsRead_;               /**< A ? has been answered since boot: limitByte_ is the VXM's, not the default */
+  asynStatus pollStatus_;        /**< The VXM part of the current poll (V, ?): error after VELMEX_POLL_FAILURES in a row */
+  int pollFailures_;             /**< Consecutive polls whose V or ? failed; 0 = the last one answered */
   asynStatus vroPollStatus_;     /**< The readout's V this poll; the axis poll reads it last */
 
   asynStatus exchange(asynUser *pasynUser, const char *cmd, char *reply, size_t maxLen,

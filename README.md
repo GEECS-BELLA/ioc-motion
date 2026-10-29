@@ -567,8 +567,8 @@ runs, because in Local mode it answers only `V` and `X`: the limit byte,
 `getD0,` and the `get...` reads are silent there, and a `D` dumps positions
 instead of stopping (U_Velmex's VXM, firmware 1.37, 2026-10-29). Its
 front-panel jog buttons are off meanwhile. Every poll: `V`
-(status letter: `R` ready / `B` busy On-Line, `J` / `b` in Local mode),
-`?` (the limit inputs as one raw byte: bit 2(m−1) the motor's negative
+(status letter: `R` ready / `B` busy On-Line, `J` / `b` in Local mode) and,
+when the VXM is idle (`R`), `?` (the limit inputs as one raw byte: bit 2(m−1) the motor's negative
 limit, bit 2(m−1)+1 its positive, 0 = activated by the manual's table for
 N/C switches, `limits_active_low: false` inverts it for a stage wired the
 other way round, 255 = none activated or connected; on a two-motor VXM the
@@ -619,7 +619,18 @@ backoff (two indexes; `K` stops at once), `K` for a program this IOC did
 not start (an IOC restarted mid-program), and nothing when the VXM runs no
 program (Local mode, or On-Line idle): the record sends STOP on an idle axis
 too, and in Local mode `D` is the digitizer dump (Appendix H), not a stop.
-The VXM's `^` (its ready prompt, one character, no terminator, sent when a
+`?` and `getD0,` go out only when the VXM is idle: sent while a program
+runs they are not answered (U_Velmex's VXM: only the `^` of the index's
+end came, and the 1 s timeout ended the move on the record with a retry
+against the stale readout, 2026-10-29). The limit byte keeps its last
+value through a program; the VXM stops on a limit by itself and the first
+idle poll reads it. A single failed poll (a timeout on either line) is a
+comm error that keeps the last state and refuses moves until a poll
+succeeds; the record sees a problem, and ends a move on it, only after
+three failed polls in a row. The record's new-target monitor (`NTM`) is
+off by default: a readout whose display lags the motion trips it mid-move
+(the record's "tdir" message and a `D`), so a VAL changed mid-move waits
+for the move to end, then goes there. The VXM's `^` (its ready prompt, one character, no terminator, sent when a
 program ends) lands anywhere in the reply stream and every VXM reply read
 skips it, the raw limit byte included: a genuine 0x5E would need bits 4 and
 6 set in an upper nibble that reads 0 on a one- or two-motor VXM (0x0C at
