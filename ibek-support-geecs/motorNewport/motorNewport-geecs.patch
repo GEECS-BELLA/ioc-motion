@@ -50,7 +50,7 @@ index 0000000..acb5e82
 +	field(DISP, "$(DISP=0)")
 +}
 diff --git a/newportApp/src/SMC100Driver.cpp b/newportApp/src/SMC100Driver.cpp
-index 05e9ef0..332c5be 100644
+index 05e9ef0..6d4c7e3 100644
 --- a/newportApp/src/SMC100Driver.cpp
 +++ b/newportApp/src/SMC100Driver.cpp
 @@ -31,6 +31,23 @@ K. Goetze 2012-03-23  Initial version
@@ -65,7 +65,7 @@ index 05e9ef0..332c5be 100644
 + * SMC100StatusUpstream: 1 (upstream) reads TP and TS at fixed character
 + *   positions (a one-digit address), MOVING (28) only as moving and the
 + *   end-of-run digit by equality; 0 parses each reply after its command name
-+ *   (addresses 1-31), counts HOMING and JOGGING as moving, reads every error
++ *   (addresses 1-31), counts HOMING and JOGGING (46, 47) as moving, reads every error
 + *   bit, sets Homed, and flags a problem in NOT REFERENCED, CONFIGURATION and
 + *   DISABLE states and on any error bit other than the two end-of-run bits
 + *   (manual EDH0206En2041 08/15, TS). */
@@ -101,7 +101,7 @@ index 05e9ef0..332c5be 100644
    // ? not sure yet
    //sprintf(pC_->outString_, "#%02dW=%d", axisNo_ + 1, closedLoop ? 1:0);
    status = pC_->writeReadController();
-@@ -301,6 +328,47 @@ asynStatus SMC100Axis::poll(bool *moving)
+@@ -301,6 +328,48 @@ asynStatus SMC100Axis::poll(bool *moving)
    int limit;
    double position;
    asynStatus comStatus;
@@ -109,6 +109,7 @@ index 05e9ef0..332c5be 100644
 +  unsigned int errorBits, state;
 +
 +  if (!SMC100StatusUpstream) {
++    *moving = false;
 +    // Read the current motor position: "<address>TP<position>"
 +    sprintf(pC_->outString_, "%1dTP", axisNo_ + 1);
 +    comStatus = pC_->writeReadController();
@@ -126,8 +127,8 @@ index 05e9ef0..332c5be 100644
 +    if (!reply || sscanf(reply + 2, "%4x%2x", &errorBits, &state) != 2) {
 +      comStatus = asynError; goto skip;
 +    }
-+    // HOMING (1E, 1F), MOVING (28) and JOGGING (46) are motion
-+    *moving = (state == 0x1E || state == 0x1F || state == 0x28 || state == 0x46);
++    // HOMING (1E, 1F), MOVING (28) and JOGGING (46 from READY, 47 from DISABLE) are motion
++    *moving = (state == 0x1E || state == 0x1F || state == 0x28 || state == 0x46 || state == 0x47);
 +    setIntegerParam(pC_->motorStatusDone_, *moving ? 0:1);
 +    setIntegerParam(pC_->motorStatusMoving_, *moving ? 1:0);
 +    // bit 0 negative end of run, bit 1 positive end of run

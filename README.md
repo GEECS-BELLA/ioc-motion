@@ -40,7 +40,7 @@ swaps one string:
 | `address` | Carrier | Line settings | Rendered |
 |---|---|---|---|
 | `/dev/serial/by-id/...` | a local tty | this IOC | `drvAsynSerialPortConfigure` + `asynSetOption` |
-| `host:port COM` | a terminal server's telnet socket with RFC 2217 (a Digi's 2001 + n−1 for port n) | this IOC, on every connect (asyn's `asynInterposeCom` restores baud, bits, parity, stop, crtscts and ixon after a reconnect) | `drvAsynIPPortConfigure` + `asynSetOption` |
+| `host:port COM` | a terminal server's telnet socket with RFC 2217 (a Digi's 2001 + n−1 for port n) | this IOC, at boot; after a reconnect asyn re-sends what it holds, with two gaps (below) | `drvAsynIPPortConfigure` + `asynSetOption` |
 | `host:port` | a raw socket (a Digi's 2101 + n−1) | the terminal server's own port configuration | `drvAsynIPPortConfigure` only |
 
 RFC 2217 (`COM`) is the default for a device on a Digi: the IOC carries the line
@@ -49,6 +49,17 @@ wrong baud (the first SMC100, 2026-10-28, was silent on the raw socket and
 answered on RFC 2217 at its manual's 57600). Upstream's `asyn.AsynIP` is not
 used for serial lines: it takes baud, parity, stop and crtscts and renders
 none of them, and neither it nor `asyn.AsynSerial` has `ixon`.
+
+Two gaps in asyn R4-46's `asynInterposeCom`, upstream and not patched here:
+on a reconnect `restoreSettings` reads each option back and sets it, and
+`crtscts` reads back `N` under XON/XOFF, so setting it turns flow control off
+before `ixon` is read (also `N` by then): **after any reconnect the line runs
+without XON/XOFF**. And `setOption` records a value only when the server
+answers, so **if the terminal server is unreachable at boot**, every
+`asynSetOption` fails and the first connect restores asyn's defaults (9600
+8N1, no flow control): the device stays silent. Restart the IOC after a
+terminal-server outage. Worth an upstream fix (restore flow control as one
+setting; keep requested values when the server is down).
 
 The file has no source and no install recipe; the Dockerfile links it into
 `/epics/ibek-defs` as ansible does a module's. It moves to a shared repo when a
@@ -223,10 +234,30 @@ defaulting to upstream behaviour (`variable()` lines in `devNewport.dbd`):
 | Variable | 1 (upstream) | 0 |
 |---|---|---|
 | `SMC100SetterResend` | `setPosition` / `setClosedLoop` resend the buffer | send nothing, print an error, return asynError (the SMC100 has no position redefine) |
-| `SMC100StatusUpstream` | fixed-position `TP`/`TS` parsing as above | parse after `TP`/`TS` (addresses 1-31); moving = HOMING (1E, 1F), MOVING (28), JOGGING (46); limits from error bits 0 and 1; Homed in every state but NOT REFERENCED (0A-11), CONFIGURATION (14) and HOMING; problem in NOT REFERENCED, CONFIGURATION, DISABLE (3C-3E) or on any other error bit (manual, `TS`) |
+| `SMC100StatusUpstream` | fixed-position `TP`/`TS` parsing as above | parse after `TP`/`TS` (addresses 1-31); moving = HOMING (1E, 1F), MOVING (28), JOGGING (46, 47); limits from error bits 0 and 1; Homed in every state but NOT REFERENCED (0A-11), CONFIGURATION (14) and HOMING; problem in NOT REFERENCED, CONFIGURATION, DISABLE (3C-3E) or on any other error bit (manual, `TS`) |
 
 `SMC100Controller`'s `setter_resend` and `status_upstream` render them and
-default to false. They are global to the IOC (every SMC100 line in it).
+default to false. They are global to the IOC (every SMC100 line in it). Both
+are worth proposing upstream: the setters as no-ops (or `setPosition` as an
+error, since the SMC100 has no position redefine), the status as a full `TS`
+decode; until then they live here.
+
+### Known gaps (R1-3, with the patch), from reading it
+
+- **Jog** (`moveVelocity`, unpatched): it moves to the controller's `SR`/`SL`
+  (the stage's travel, outside the record's `DHLM`/`DLLM`; the record's soft
+  limit stops it, overshooting by the deceleration distance), parses the
+  `SR?`/`SL?` reply at a fixed offset (addresses 10-31 read 0: a jog becomes a
+  move to 0), and sends a negative `VA` for a reverse jog, which the
+  controller refuses (error C), so the jog runs at the last `VA`. Do not jog
+  a chain with addresses above 9.
+- **CONFIGURATION state** stalls the poll: `TP` is refused there (error I,
+  no reply), so each poll waits out the asyn timeout before `TS`, and the
+  record shows a communication problem, not the state. Nothing in this IOC
+  enters CONFIGURATION; commissioning does, with the IOC stopped.
+- **Homing**: `OR` is accepted only NOT REFERENCED (error K in READY), so the
+  record's HOMF/HOMR do nothing on a referenced stage; a re-home needs `RS`
+  first, which the driver never sends.
 
 ## Aerotech Ensemble
 
