@@ -554,7 +554,9 @@ The ibek entities (`ibek-support-geecs/motorVelmex/motorVelmex.ibek.support.yaml
   acceleration setting (`accel_setting`, 0 = leave the controller's) and
   the home backoff.
 
-**What goes down the lines.** Creation sends nothing. Every poll: `V`
+**What goes down the lines.** Creation sends nothing; the first poll sends
+`Q` if the VXM was left On-Line (an IOC killed mid-move), else only queries.
+Every poll: `V`
 (status letter: `R` ready / `B` busy On-Line, `J` / `b` in Local mode),
 `?` (the limit inputs as one raw byte: bit 2(m−1) the motor's negative
 limit, bit 2(m−1)+1 its positive, 0 = activated, 255 = none activated or
@@ -565,7 +567,9 @@ value in its primary unit, CR) on the readout; `getD0,` once (firmware,
 1.20 and up; older firmware is silent and the record reads "no reply").
 The readout answers `X` in Display mode without any mode command, and the
 driver never sends it one (`E`/`F` would put it in Setup mode and blank its
-buttons); a readout not in Display mode is a problem on the record. The
+buttons); a readout not in Display mode, or silent, is a problem on the
+record while the VXM's position and done state are still read, and no move
+is accepted until it answers again (no reference to close the loop on). The
 VXM is On-Line only while a program runs: every program is preceded by `F`
 (On-Line with echo off; the front-panel jog buttons are disabled until `Q`)
 and the first idle poll after it sends `Q` (back to Local mode), so the
@@ -583,11 +587,15 @@ first moves away from the switch, so it is always approached from one side;
 neither the VXM's register nor the readout is zeroed. A stop is `D`
 (decelerate the running index; the program then goes on to its next
 command, which is fine for a one-index move) or `K` for a home with a
-backoff (two indexes; `K` stops at once). The VXM's `^` (its ready prompt,
-one character, no terminator, sent when a program ends) lands anywhere in
-the reply stream and every VXM reply read skips it, except the raw limit
-byte, which could be 0x5E (motor 1's negative and motors 3-4's limits
-activated at once) — a `^` read as a limit byte is one poll of wrong limits.
+backoff (two indexes; `K` stops at once), and nothing when no program of
+ours is running: the record sends STOP on an idle axis too, and the idle VXM
+is in Local mode, where `D` is the digitizer dump (Appendix H), not a stop.
+The VXM's `^` (its ready prompt, one character, no terminator, sent when a
+program ends) lands anywhere in the reply stream and every VXM reply read
+skips it, the raw limit byte included: a genuine 0x5E would need motor 1's
+negative and motors 3 and 4's positive limits activated at once, impossible
+on a one- or two-motor VXM (unconnected inputs read 1), while a `^` taken as
+the byte would end a negative move on a false LLS with no retry.
 
 **Refused, nothing sent:** jog (`moveVelocity`: the VXM has no host-driven
 continuous move outside a stored program; `TWF`/`TWR` are moves and work),

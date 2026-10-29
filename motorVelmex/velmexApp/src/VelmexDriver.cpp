@@ -70,7 +70,7 @@ VelmexController::VelmexController(const char *portName, const char *vxmPortName
                         ASYN_CANBLOCK | ASYN_MULTIDEVICE,
                         1, 0, 0),
     pasynUserEncoder_(NULL), online_(0), identified_(0),
-    vxmStatus_('?'), vroStatus_('?'), limitByte_(0xFF), pollStatus_(asynSuccess)
+    vxmStatus_('?'), vroStatus_('?'), limitByte_(0xFF), pollStatus_(asynSuccess), vroPollStatus_(asynSuccess)
 {
   static const char *functionName = "VelmexController";
   asynStatus status;
@@ -200,11 +200,16 @@ asynStatus VelmexController::readStatus()
 
 /** ?: one raw byte, a bit per limit input (bit 0 = motor 1 negative, bit 1 =
   * motor 1 positive, ... bit 7 = motor 4 positive); 0 = activated, 1 = not
-  * activated or not connected (manual: normally closed switches, 255 = none). */
+  * activated or not connected (manual: normally closed switches, 255 = none).
+  * The ready prompt ^ (0x5E) is skipped here too: a genuine 0x5E needs motor
+  * 1's negative and motors 3 and 4's positive limits activated at once,
+  * impossible on a one- or two-motor VXM (unconnected inputs read 1), while a
+  * prompt read as the byte would end a negative move on a false LLS with no
+  * retry (the record skips the retry on a limit in the move's direction). */
 asynStatus VelmexController::readLimits()
 {
   char reply[VELMEX_REPLY_LEN];
-  asynStatus status = exchange(pasynUserController_, "?", reply, sizeof(reply), 0, 0, VELMEX_VXM_TIMEOUT);
+  asynStatus status = exchange(pasynUserController_, "?", reply, sizeof(reply), 0, 1, VELMEX_VXM_TIMEOUT);
   if (status == asynSuccess) limitByte_ = (unsigned char)reply[0];
   return status;
 }
@@ -284,8 +289,8 @@ asynStatus VelmexController::poll()
     if (writeVxm("Q") == asynSuccess) { online_ = 0; vxmStatus_ = 'J'; }
   }
   asynStatus s2 = readLimits();
-  asynStatus s3 = pasynUserEncoder_ ? readVroStatus() : asynSuccess;
-  pollStatus_ = (s1 || s2 || s3) ? asynError : asynSuccess;
+  vroPollStatus_ = pasynUserEncoder_ ? readVroStatus() : asynSuccess;
+  pollStatus_ = (s1 || s2) ? asynError : asynSuccess;   /* the VXM alone: a silent readout must not hide the VXM */
   s[0] = vxmStatus_;
   setStringParam(VelmexVxmStatus_, s);
   s[0] = vroStatus_;
@@ -300,7 +305,7 @@ asynStatus VelmexController::poll()
 VelmexAxis::VelmexAxis(VelmexController *pC, int axisNo)
   : asynMotorAxis(pC, axisNo),
     pC_(pC), motor_(axisNo + 1), encoder_(0), eres_(1.0), accelSetting_(0), homeBackoff_(0),
-    moving_(0), homing_(0), homed_(0), homeForwards_(0), multiIndex_(0), lastSteps_(0)
+    moving_(0), homing_(0), homed_(0), homeForwards_(0), multiIndex_(0), lastSteps_(0), encoderOk_(0)
 {
   setIntegerParam(pC_->motorStatusHasEncoder_, 0);
   setIntegerParam(pC_->motorStatusGainSupport_, 0);
@@ -373,6 +378,12 @@ asynStatus VelmexAxis::move(double position, int relative, double minVelocity, d
   long now, target, speed;
   int n;
 
+  if (encoder_ && pC_->pasynUserEncoder_ && !encoderOk_) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+              "%s:%s: motor %d: the readout did not answer on the last poll (status '%c'): no reference, move refused\n",
+              driverName, functionName, motor_, pC_->vroStatus_);
+    return asynError;
+  }
   asynStatus status = pC_->readSteps(motor_, &now);
   if (status) return status;
   lastSteps_ = now;
@@ -433,7 +444,17 @@ asynStatus VelmexAxis::home(double minVelocity, double maxVelocity, double accel
   * only there. */
 asynStatus VelmexAxis::stop(double acceleration)
 {
-  asynStatus status = pC_->writeVxm(multiIndex_ ? "K" : "D");
+  static const char *functionName = "stop";
+  asynStatus status = asynSuccess;
+  /* Only a program of ours can be stopped. The record sends STOP on an idle
+   * axis too ("just in case"), and the idle VXM is in Local mode, where D is
+   * the digitizer dump (Appendix H: two position lines), not a stop. */
+  if (pC_->online_ && (moving_ || pC_->busy())) {
+    status = pC_->writeVxm(multiIndex_ ? "K" : "D");
+  } else {
+    asynPrint(pasynUser_, ASYN_TRACE_FLOW, "%s:%s: motor %d: no program running; nothing sent\n",
+              driverName, functionName, motor_);
+  }
   homing_ = 0;
   return status;
 }
@@ -493,13 +514,15 @@ asynStatus VelmexAxis::poll(bool *moving)
   setIntegerParam(pC_->motorStatusMoving_, moving_);
   setIntegerParam(pC_->motorStatusHomed_, homed_);
 
-  /* The readout last: a readout out of Display mode, or silent, is a problem
-   * on the record (its RBV keeps the last value) but does not hold the record
-   * in a move the VXM has finished. */
+  /* The readout last: a readout silent or out of Display mode is a problem on
+   * the record (its RBV keeps the last value) but does not hold the record in
+   * a move the VXM has finished, and until it answers again no move is
+   * accepted (no reference: a retry against a stale REP would move wrong). */
   if (encoder_ && pC_->pasynUserEncoder_) {
-    if (pC_->vroStatus_ != 'D') { status = asynError; goto skip; }
+    if (pC_->vroPollStatus_ || pC_->vroStatus_ != 'D') { encoderOk_ = 0; status = asynError; goto skip; }
     status = pC_->readEncoder(encoder_, &value);
-    if (status) goto skip;
+    if (status) { encoderOk_ = 0; goto skip; }
+    encoderOk_ = 1;
     setDoubleParam(pC_->motorEncoderPosition_, value / eres_);
   }
 
@@ -555,7 +578,9 @@ extern "C" int VelmexAxisConfig(const char *portName, int motor, int encoder, co
     printf("VelmexAxisConfig: homeBackoff %d is not 0..%ld\n", homeBackoff, VELMEX_MAX_INDEX);
     return asynError;
   }
+  pC->lock();                            /* the poller is already running */
   pAxis->configure(encoder, eres, accelSetting, homeBackoff);
+  pC->unlock();
   return asynSuccess;
 }
 

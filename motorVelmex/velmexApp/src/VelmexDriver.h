@@ -57,6 +57,7 @@ private:
   int accelSetting_;       /**< A<m>M<x> sent before every index, 1..127; 0 = leave the controller's */
   int homeBackoff_;        /**< Steps moved away from the limit before a home seeks it; 0 = none */
   int moving_;             /**< This axis's program is running */
+  int encoderOk_;          /**< The readout answered on the last poll: a reference exists */
   int homing_;             /**< The running program is a home */
   int homed_;              /**< A home finished since the IOC started */
   int homeForwards_;       /**< The last home sought the positive limit */
@@ -92,7 +93,8 @@ private:
   char vxmStatus_;               /**< The last V reply: R, B, J, b; '?' none yet */
   char vroStatus_;               /**< The readout's last V reply: D, P, S, F; '?' none yet */
   unsigned char limitByte_;      /**< The last ? reply */
-  asynStatus pollStatus_;        /**< The controller-wide part of the current poll */
+  asynStatus pollStatus_;        /**< The VXM part of the current poll (V, ?) */
+  asynStatus vroPollStatus_;     /**< The readout's V this poll; the axis poll reads it last */
 
   asynStatus exchange(asynUser *pasynUser, const char *cmd, char *reply, size_t maxLen,
                       int terminated, int skipCaret, double timeout);
