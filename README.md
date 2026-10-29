@@ -728,10 +728,13 @@ value through a program; the VXM stops on a limit by itself and the first
 idle poll reads it. A single failed poll (a timeout on either line) is a
 comm error that keeps the last state and refuses moves until a poll
 succeeds; the record sees a problem, and ends a move on it, only after
-three failed polls in a row. The record's new-target monitor (`NTM`) is
-off by default: a readout whose display lags the motion trips it mid-move
-(the record's "tdir" message and a `D`), so a VAL changed mid-move waits
-for the move to end, then goes there. The VXM's `^` (its ready prompt, one character, no terminator, sent when a
+three failed polls in a row. The record's new-target monitor (`NTM`, an
+entity parameter, on by default as in the record) stops a move whose
+readback ends up on the wrong side of the target and re-issues it: on
+U_Velmex it was the recovery after the record's bad retries (the repeat of
+phase B, 2026-10-29: "tdir" twice, then the move that brought the stage
+back), and on the fake's once-a-second display model it stops a move
+mid-way (`D`) and re-issues it, a slower move at worst. The VXM's `^` (its ready prompt, one character, no terminator, sent when a
 program ends) lands anywhere in the reply stream and every VXM reply read
 skips it, the raw limit byte included: a genuine 0x5E would need bits 4 and
 6 set in an upper nibble that reads 0 on a one- or two-motor VXM (0x0C at

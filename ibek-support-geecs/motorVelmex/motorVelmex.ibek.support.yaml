@@ -216,11 +216,13 @@ entity_models:
         type: bool
         description: |-
           The record's new-target monitor: it stops a move whose readback
-          seems to go the wrong way and re-issues it. A readout whose display
-          lags the motion trips it mid-move (the fake run, and the record's
-          "tdir" message), so it is off here; a VAL changed mid-move waits
-          for the move to end
-        default: false
+          ends up on the wrong side of the target and re-issues it. On
+          U_Velmex it was the recovery after the record's bad retries (the
+          repeat of phase B, 2026-10-29: "tdir" twice, then the move that
+          brought the stage back); on the fake's once-a-second display model
+          it stops a move mid-way and re-issues it, a slower move at worst.
+          The record's default, on
+        default: true
       TWV:
         type: float
         description: |-
