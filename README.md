@@ -662,7 +662,13 @@ The ibek entities (`ibek-support-geecs/motorVelmex/motorVelmex.ibek.support.yaml
   acceleration setting (`accel_setting`, 0 = leave the controller's) and
   the home backoff.
 
-**What goes down the lines.** Creation sends nothing; the first poll sends
+**What goes down the lines.** Creation sends nothing; `VelmexAxisConfig`
+runs one poll before iocInit, so the record's initial VAL is the real
+position (the poller starts in the controller's constructor and its first
+poll ran before the axis had its encoder, so it read the VXM's register but
+not the readout; the record, initialising under UEIP from that status, took
+an encoder position of 0: VAL 0, below DLLM, LVIO until the first move);
+the first poll sends
 `F` (the VXM On-Line, echo off) and the VXM stays On-Line while the IOC
 runs, because in Local mode it answers only `V` and `X`: the limit byte,
 `getD0,` and the `get...` reads are silent there, and a `D` dumps positions
@@ -670,10 +676,12 @@ instead of stopping (U_Velmex's VXM, firmware 1.37, 2026-10-29). Its
 front-panel jog buttons are off meanwhile. Every poll: `V`
 (status letter: `R` ready / `B` busy On-Line, `J` / `b` in Local mode) and,
 when the VXM is idle (`R`), `?` (the limit inputs as one raw byte: bit 2(m−1) the motor's negative
-limit, bit 2(m−1)+1 its positive, 0 = activated by the manual's table for
-N/C switches, `limits_active_low: false` inverts it for a stage wired the
-other way round, 255 = none activated or connected; on a two-motor VXM the
-upper nibble reads 0) and `X`/`Y`/`Z`/`T` (motor 1-4's position register, `+0001200`
+limit, bit 2(m−1)+1 its positive; 0 = activated as the manual's table
+labels it, which fits normally-open wiring; `limits_active_low: false` for
+Velmex's own normally-closed wiring, where a pressed switch opens the
+circuit and reads 1 (U_Velmex: 0x0C at rest, 0x0D on the negative limit);
+255 = none activated or connected; on a two-motor VXM the upper nibble
+reads 0) and `X`/`Y`/`Z`/`T` (motor 1-4's position register, `+0001200`
 CR, readable while indexing) on the VXM; `V` (`D` display mode, `P` power-up
 menu, `S` setup, `F` front-panel setup) and `X`/`Y` (encoder 1/2's displayed
 value in its primary unit, CR) on the readout; `getD0,` once, On-Line
