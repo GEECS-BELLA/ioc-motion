@@ -1,3 +1,43 @@
+diff --git a/aerotechApp/Db/EnsembleMotor.db b/aerotechApp/Db/EnsembleMotor.db
+new file mode 100644
+index 0000000..d128f69
+--- /dev/null
++++ b/aerotechApp/Db/EnsembleMotor.db
+@@ -0,0 +1,34 @@
++# ioc-motion: one Ensemble axis as a motor record on the asyn motor driver
++# (drvAsynMotorConfigure "motorEnsemble"), and nothing else: no auxiliary
++# records with links into the driver. RSTM defaults to Never, so the record
++# never redefines the controller's position at init (devMotorAsyn's
++# init_controller sends POSOFFSET SET for RSTM Always, or NearZero/Conditional
++# with a non-zero DVAL, i.e. after an autosave restore). DISP 1 refuses every
++# put to the record's fields (dbPutField: CA, and the iocsh's dbpf) without
++# stopping the driver's status callbacks from processing it, so readbacks
++# stay live; a put to DISP itself is still accepted (access security decides).
++record(motor, "$(P)$(M)")
++{
++	field(DESC, "$(DESC)")
++	field(DTYP, "asynMotor")
++	field(OUT,  "@asyn($(PORT),$(ADDR))")
++	field(DIR,  "$(DIR)")
++	field(VELO, "$(VELO)")
++	field(VBAS, "$(VBAS)")
++	field(VMAX, "$(VMAX=0)")
++	field(ACCL, "$(ACCL)")
++	field(BDST, "$(BDST)")
++	field(BVEL, "$(BVEL)")
++	field(BACC, "$(BACC)")
++	field(MRES, "$(MRES)")
++	field(ERES, "$(ERES=0)")
++	field(PREC, "$(PREC)")
++	field(EGU,  "$(EGU)")
++	field(DHLM, "$(DHLM)")
++	field(DLLM, "$(DLLM)")
++	field(RDBD, "$(RDBD=0)")
++	field(RTRY, "$(RTRY=0)")
++	field(RSTM, "$(RSTM=Never)")
++	field(TWV,  "$(TWV=1)")
++	field(DISP, "$(DISP=0)")
++}
 diff --git a/aerotechApp/Db/Makefile b/aerotechApp/Db/Makefile
 index 403f76b..57ed0d3 100644
 --- a/aerotechApp/Db/Makefile
