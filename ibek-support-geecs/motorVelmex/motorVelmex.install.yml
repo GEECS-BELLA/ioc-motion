@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../../ibek-support/_scripts/support_install_variables.json
+
+# The module's source is in this repository (motorVelmex/), copied to
+# /epics/support/motorVelmex by the Dockerfile before ansible.sh runs, so the
+# clone step finds it in place and builds it (as ioc-picoscope's driver).
+module: motorVelmex
+version: local
+
+dbds:
+  - motorVelmexSupport.dbd
+  - motorRecord.dbd
+  - motorSupport.dbd
+
+libs:
+  - motorVelmex
+  - motor
+  - asyn

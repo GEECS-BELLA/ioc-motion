@@ -1,0 +1,36 @@
+# ioc-motion: what the Velmex driver reads beyond the motor records, per
+# controller (one VXM line and its VRO line): the VXM's status letter (V: R
+# ready, B busy, J local idle, b local moving), the readout's status letter
+# (V: D display mode, the only state in which it answers X; P power-up menu, S
+# setup, F front-panel setup), the raw limit byte (?: one bit per limit input,
+# 0 = activated, motor 1 in bits 0 and 1) and the VXM firmware (getD0, read
+# once; empty when the controller does not answer it). Read-only records,
+# updated by the poller.
+record(stringin, "$(P)vxm_status")
+{
+	field(DESC, "VXM status letter (V)")
+	field(DTYP, "asynOctetRead")
+	field(INP,  "@asyn($(PORT),0)VELMEX_VXM_STATUS")
+	field(SCAN, "I/O Intr")
+}
+record(stringin, "$(P)vro_status")
+{
+	field(DESC, "VRO readout status letter (V)")
+	field(DTYP, "asynOctetRead")
+	field(INP,  "@asyn($(PORT),0)VELMEX_VRO_STATUS")
+	field(SCAN, "I/O Intr")
+}
+record(longin, "$(P)limit_byte")
+{
+	field(DESC, "VXM limit inputs (?), 0 = active")
+	field(DTYP, "asynInt32")
+	field(INP,  "@asyn($(PORT),0)VELMEX_LIMIT_BYTE")
+	field(SCAN, "I/O Intr")
+}
+record(stringin, "$(P)vxm_version")
+{
+	field(DESC, "VXM firmware (getD0)")
+	field(DTYP, "asynOctetRead")
+	field(INP,  "@asyn($(PORT),0)VELMEX_VXM_VERSION")
+	field(SCAN, "I/O Intr")
+}
