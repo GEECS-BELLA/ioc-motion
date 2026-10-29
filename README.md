@@ -578,8 +578,9 @@ record while the VXM's position and done state are still read, and no move
 is accepted until it answers again (no reference to close the loop on).
 The readout's power-up start menu answers no position either (`V` says `P`);
 `F` then `Q` on its line takes it to Display mode, which the snapshot's
-`--identity` pass does and the driver does not. A program is preceded by
-`F` only if the VXM dropped back to Local mode (a power cycle). The exit
+`--identity` pass does and the driver does not. After a VXM power cycle the
+poll re-sends `F`; a program sends it only as the fallback for a failed `F`
+write. The exit
 `Q` the driver registers runs on an iocsh `exit` only: a `docker stop` never
 reaches epicsAtExit (the IOC is a child of the launcher and is killed after
 the grace period), so a stopped IOC leaves the VXM On-Line until a `Q`, a
@@ -599,10 +600,10 @@ program (Local mode, or On-Line idle): the record sends STOP on an idle axis
 too, and in Local mode `D` is the digitizer dump (Appendix H), not a stop.
 The VXM's `^` (its ready prompt, one character, no terminator, sent when a
 program ends) lands anywhere in the reply stream and every VXM reply read
-skips it, the raw limit byte included: a genuine 0x5E would need motor 1's
-negative and motors 3 and 4's positive limits activated at once, impossible
-on a one- or two-motor VXM (unconnected inputs read 1), while a `^` taken as
-the byte would end a negative move on a false LLS with no retry.
+skips it, the raw limit byte included: a genuine 0x5E would need bits 4 and
+6 set in an upper nibble that reads 0 on a one- or two-motor VXM (0x0C at
+rest on U_Velmex's), while a `^` taken as the byte would end a negative move
+on a false LLS with no retry.
 
 **Refused, nothing sent:** jog (`moveVelocity`: the VXM has no host-driven
 continuous move outside a stored program; `TWF`/`TWR` are moves and work),

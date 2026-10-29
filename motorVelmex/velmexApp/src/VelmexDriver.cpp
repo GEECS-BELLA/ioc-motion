@@ -205,11 +205,11 @@ asynStatus VelmexController::readStatus()
 /** ?: one raw byte, a bit per limit input (bit 0 = motor 1 negative, bit 1 =
   * motor 1 positive, ... bit 7 = motor 4 positive); 0 = activated, 1 = not
   * activated or not connected (manual: normally closed switches, 255 = none).
-  * The ready prompt ^ (0x5E) is skipped here too: a genuine 0x5E needs motor
-  * 1's negative and motors 3 and 4's positive limits activated at once,
-  * impossible on a one- or two-motor VXM (unconnected inputs read 1), while a
-  * prompt read as the byte would end a negative move on a false LLS with no
-  * retry (the record skips the retry on a limit in the move's direction). */
+  * The ready prompt ^ (0x5E) is skipped here too: a genuine 0x5E needs bits 4
+  * and 6 set in an upper nibble that reads 0 on a one- or two-motor VXM (0x0C
+  * at rest on U_Velmex's), while a prompt read as the byte would end a
+  * negative move on a false LLS with no retry (the record skips the retry on
+  * a limit in the move's direction). */
 asynStatus VelmexController::readLimits()
 {
   char reply[VELMEX_REPLY_LEN];
@@ -271,11 +271,19 @@ asynStatus VelmexController::readEncoder(int encoder, double *value)
 void VelmexController::identify()
 {
   char reply[VELMEX_REPLY_LEN];
-  identified_ = 1;
   if (exchange(pasynUserController_, "getD0,", reply, sizeof(reply), 1, 1, VELMEX_VXM_TIMEOUT) == asynSuccess) {
-    setStringParam(VelmexVxmVersion_, reply);
+    /* A version is digits and a dot ("1.37"); anything else (the Local-mode
+     * dump "X+0000000" if the VXM had not taken F yet) is asked again next poll. */
+    size_t n = strspn(reply, "0123456789.");
+    if (n > 0 && reply[n] == '\0' && strchr(reply, '.')) {
+      setStringParam(VelmexVxmVersion_, reply);
+      identified_ = 1;
+    } else {
+      setStringParam(VelmexVxmVersion_, reply);
+    }
   } else {
     setStringParam(VelmexVxmVersion_, "no reply to getD0");
+    identified_ = 1;              /* older firmware is silent: do not ask every poll */
   }
 }
 

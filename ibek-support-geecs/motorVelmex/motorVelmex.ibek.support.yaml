@@ -14,8 +14,9 @@ entity_models:
       One VXM (1-4 motors) and the VRO readout beside it: the driver over two
       geecsSerial.Ports (9600 8N1 both, the devices' standard; no terminators).
       Creation sends nothing; the poller sends V, X/Y/Z/T and ? to the VXM,
-      V and X/Y to the readout, and getD0 once. The first move sends F (the
-      VXM On-Line, its jog buttons off); the IOC's exit sends Q (back to Local).
+      V and X/Y to the readout, and getD0 once. The first poll sends F and the
+      VXM stays On-Line while the IOC runs (its jog buttons off: in Local mode
+      it answers V and X only); a clean exit sends Q (back to Local).
     parameters:
       name:
         type: id
