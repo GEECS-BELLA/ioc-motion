@@ -23,10 +23,14 @@ Details, the patch and the driver's gaps: `README.md`.
   fields: README). The `variable()` lines in the dbd
   are what make `var` work: without them iocsh prints "No known var" and the
   stock behaviour runs.
-  `ibek-support-geecs/motorAerotech/aerotech-ensemble-read-only-init.patch`:
+  `ibek-support-geecs/motorAerotech/aerotech-ensemble.patch`:
   iocsh variable `EnsembleInitWrites`, C default 1 (upstream: a `NONE` probe,
   `RAMP MODE` and `WAIT MODE NOWAIT` at config); the `EnsembleSetup`
-  entity's `init_writes` defaults to false (README "Aerotech Ensemble").
+  entity's `init_writes` defaults to false. And the per-axis power policy,
+  iocsh `EnsembleAxisPower(card, axis, policy, onDelay, offDelay)`, rendered
+  by the `EnsembleAxis` entity's `power_policy` (`leave` default: no call,
+  upstream; `on_for_move`; `keep_on`), `power_on_delay`, `power_off_delay`
+  (README "Aerotech Ensemble", "Power policy"; hardware check owed).
 - **Build.** On the IOC host: `docker build --target runtime -t ioc-motion:local ~/ioc-motion`.
   On a workstation: `DOCKER_DEFAULT_PLATFORM=linux/amd64 TARGET=runtime
   TAG=ioc-motion:local ./build` (the variable is required on Apple silicon; the
