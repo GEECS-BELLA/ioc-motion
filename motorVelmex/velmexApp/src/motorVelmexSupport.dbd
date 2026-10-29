@@ -1,0 +1,3 @@
+# Velmex VXM + VRO motor driver (ioc-motion). The motor record's own dbd
+# (motorRecord.dbd, motorSupport.dbd) comes from the motor module.
+registrar(VelmexRegister)

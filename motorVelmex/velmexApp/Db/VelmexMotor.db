@@ -1,0 +1,37 @@
+# ioc-motion: one Velmex VXM motor as a motor record on VelmexDriver (DTYP
+# asynMotor), the VRO encoder readout as its encoder (UEIP Yes, ERES), and
+# nothing else: no auxiliary records with links into the driver. The VXM is
+# open-loop and the readout is the reference, so the record closes the loop
+# the way the LabVIEW driver did: after each index it compares the readout
+# with the target and, within RTRY retries, indexes the difference until it is
+# inside RDBD. RSTM Never: the record never asks the driver to redefine the
+# position at init (the VXM can only null its registers, which the driver
+# refuses). DISP 1 refuses every put to the record's fields (dbPutField: CA and
+# dbpf) without stopping the driver's status callbacks, so readbacks stay live.
+record(motor, "$(P)$(M)")
+{
+	field(DESC, "$(DESC)")
+	field(DTYP, "asynMotor")
+	field(OUT,  "@asyn($(PORT),$(ADDR))")
+	field(DIR,  "$(DIR)")
+	field(VELO, "$(VELO)")
+	field(VBAS, "$(VBAS)")
+	field(VMAX, "$(VMAX)")
+	field(ACCL, "$(ACCL)")
+	field(HVEL, "$(HVEL)")
+	field(BDST, "$(BDST)")
+	field(BVEL, "$(BVEL)")
+	field(BACC, "$(BACC)")
+	field(MRES, "$(MRES)")
+	field(ERES, "$(ERES)")
+	field(UEIP, "$(UEIP)")
+	field(PREC, "$(PREC)")
+	field(EGU,  "$(EGU)")
+	field(DHLM, "$(DHLM)")
+	field(DLLM, "$(DLLM)")
+	field(RDBD, "$(RDBD)")
+	field(RTRY, "$(RTRY)")
+	field(RSTM, "Never")
+	field(TWV,  "$(TWV)")
+	field(DISP, "$(DISP)")
+}

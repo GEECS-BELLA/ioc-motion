@@ -1,0 +1,258 @@
+# yaml-language-server: $schema=https://github.com/epics-containers/ibek/releases/download/3.0.1/ibek.support.schema.json
+
+# Velmex VXM stepping-motor controller with a Velmex VRO encoder readout, our
+# driver (motorVelmex/, README "Velmex VXM + VRO"). Two serial lines, both
+# geecsSerial.Ports with NO input terminator: the devices answer a CR-ended
+# value, a single letter or a single raw byte, and the driver reads each reply
+# the way its command is documented.
+
+module: motorVelmex
+
+entity_models:
+  - name: VelmexController
+    description: |-
+      One VXM (1-4 motors) and the VRO readout beside it: the driver over two
+      geecsSerial.Ports (9600 8N1 both, the devices' standard; no terminators).
+      Creation sends nothing; the poller sends V, X/Y/Z/T and ? to the VXM,
+      V and X/Y to the readout, and getD0 once. The first poll sends F and the
+      VXM stays On-Line while the IOC runs (its jog buttons off: in Local mode
+      it answers V and X only); a clean exit sends Q (back to Local).
+    parameters:
+      name:
+        type: id
+        description: |-
+          The motor driver's asyn port name (the axes' PORT)
+      vxm_port:
+        type: object
+        description: |-
+          The geecsSerial.Port of the VXM's line
+      vro_port:
+        type: object
+        description: |-
+          The geecsSerial.Port of the readout's line
+      P:
+        type: str
+        description: |-
+          PV prefix of this controller's records, with its trailing colon
+      num_axes:
+        type: int
+        description: |-
+          Motors on the VXM, 1..4 (motor n is the driver's axis n-1)
+        default: 1
+      moving_poll_ms:
+        type: int
+        description: |-
+          Poll period while a motor moves, ms. A poll is V, ? and one X per
+          motor on the VXM plus V and one X per encoder on the readout, each
+          a round trip over the line
+        default: 500
+      idle_poll_ms:
+        type: int
+        description: |-
+          Poll period while idle, ms; 0 = none
+        default: 2000
+
+    pre_init:
+      - value: |
+          # VelmexCreateController(motorPort, vxmSerialPort, vroSerialPort, numAxes, movingPollMs, idlePollMs)
+          VelmexCreateController("{{name}}", "{{vxm_port.name}}", "{{vro_port.name}}", {{num_axes}}, {{moving_poll_ms}}, {{idle_poll_ms}})
+
+    databases:
+      - file: VelmexController.db
+        args:
+          P: "{{P}}"
+          PORT: "{{name}}"
+
+  - name: VelmexAxis
+    description: |-
+      One VXM motor as a motor record ($(P)$(M)) on VelmexMotor.db, the
+      readout's encoder as its position (UEIP, ERES), the record closing the
+      loop (RTRY, RDBD) as the LabVIEW driver did. RSTM Never, DISP at boot.
+    parameters:
+      controller:
+        type: object
+        description: |-
+          The VelmexController this motor is on
+      motor:
+        type: int
+        description: |-
+          The VXM motor number, 1..controller.num_axes
+        default: 1
+      encoder:
+        type: int
+        description: |-
+          The readout's encoder for this motor: 1 (its X), 2 (its Y, a VRO-2);
+          0 = none (UEIP must then be false: the record follows the steps)
+        default: 1
+      ERES:
+        type: float
+        description: |-
+          Record units per encoder count. The readout answers in its own
+          displayed unit (its primary unit, mm here), which the driver divides
+          by this to make counts for the record, so any value works as long as
+          the readout's unit over ERES fits an int32: 0.001 shows a
+          micrometre and keeps 2 km in range. Its sign flips the readout's
+          direction against the motor's.
+        default: 0.001
+      accel_setting:
+        type: int
+        description: |-
+          The VXM's acceleration setting A<m>M<x>, 1..127, sent before every
+          index; 0 = leave the controller's stored setting alone
+        default: 0
+      home_backoff:
+        type: int
+        description: |-
+          Steps moved away from the limit switch before a home seeks it, so
+          the switch is approached from one side; 0 = none. The LabVIEW
+          driver's home used 500
+        default: 0
+      limits_active_low:
+        type: bool
+        description: |-
+          true: a limit input reads 0 when activated, the manual's table for
+          N/C switches; false: inverted, for a stage wired the other way
+          round (U_Velmex's VXM reads 0x0C at rest, motor 1's two bits low,
+          off the switches)
+        default: true
+      M:
+        type: str
+        description: |-
+          PV suffix of the motor record, e.g. m1
+      DESC:
+        type: str
+        description: |-
+          Description
+        default: ""
+      EGU:
+        type: str
+        description: |-
+          Engineering units: the readout's primary unit
+        default: mm
+      MRES:
+        type: float
+        description: |-
+          Record units per motor step (the lead screw's advance per step, or
+          the measured one). No default on purpose: a wrong value makes every
+          index the wrong length and the record retries against the readout
+      PREC:
+        type: int
+        description: |-
+          Display precision
+        default: 3
+      DIR:
+        type: enum
+        description: |-
+          User direction
+        default: Pos
+        values:
+          Pos: Pos
+          Neg: Neg
+      VELO:
+        type: float
+        description: |-
+          Velocity (EGU/s), sent as S<m>M<steps/s> with each index
+      VMAX:
+        type: float
+        description: |-
+          Highest velocity the record accepts (EGU/s); the VXM takes up to
+          6000 steps/s, the motor and stage less
+      VBAS:
+        type: float
+        description: |-
+          Base velocity (EGU/s); the VXM has none, the record keeps it
+        default: 0.0
+      ACCL:
+        type: float
+        description: |-
+          Seconds to velocity, the record's; the VXM's own ramp is accel_setting
+        default: 0.5
+      HVEL:
+        type: float
+        description: |-
+          Home velocity (EGU/s), sent as S<m>M<steps/s> with the home program
+      BDST:
+        type: float
+        description: |-
+          The record's backlash distance (EGU); 0 = none
+        default: 0
+      BVEL:
+        type: float
+        description: |-
+          Backlash velocity (EGU/s)
+        default: 1
+      BACC:
+        type: float
+        description: |-
+          Backlash seconds to velocity
+        default: 0.5
+      DHLM:
+        type: float
+        description: |-
+          Dial high limit (EGU), enforced by the record (the VXM has only its switches)
+        default: 0
+      DLLM:
+        type: float
+        description: |-
+          Dial low limit (EGU); 0 and 0 = no record limits
+        default: 0
+      RDBD:
+        type: float
+        description: |-
+          Retry deadband (EGU): the readout must land within it or the record
+          indexes the difference again, RTRY times
+      RTRY:
+        type: int
+        description: |-
+          Retries after an index that ends outside RDBD
+        default: 3
+      UEIP:
+        type: bool
+        description: |-
+          Use the readout as the position (true: the record's RBV is the
+          encoder); false only with encoder 0
+        default: true
+      TWV:
+        type: float
+        description: |-
+          Tweak step (EGU)
+        default: 1
+      DISP:
+        type: bool
+        description: |-
+          Disable puts to the record (DISP 1) at boot; readbacks stay live
+        default: true
+
+    pre_init:
+      - value: |
+          # VelmexAxisConfig(motorPort, motor, encoder, encoderUnitsPerCount, accelSetting, homeBackoff, limitsActiveLow)
+          VelmexAxisConfig("{{controller.name}}", {{motor}}, {{encoder}}, "{{ERES}}", {{accel_setting}}, {{home_backoff}}, {{ 1 if limits_active_low else 0 }})
+
+    databases:
+      - file: VelmexMotor.db
+        args:
+          P: "{{controller.P}}"
+          M:
+          DESC:
+          PORT: "{{controller.name}}"
+          ADDR: "{{motor - 1}}"
+          DIR:
+          VELO:
+          VMAX:
+          VBAS:
+          ACCL:
+          HVEL:
+          BDST:
+          BVEL:
+          BACC:
+          MRES:
+          ERES:
+          UEIP: "{{ 'Yes' if UEIP else 'No' }}"
+          PREC:
+          EGU:
+          DHLM:
+          DLLM:
+          RDBD:
+          RTRY:
+          TWV:
+          DISP: "{{ 1 if DISP else 0 }}"
