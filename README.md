@@ -573,16 +573,20 @@ progress"). Every poll pass reads it once, after `#5`: `$(P)STATUS_WORD` is
 the word, `$(P)REFERENCED` bit 16 (and every axis's MSTA homed bit),
 `$(P)INITIALISING` bit 19, and `$(P)STATE` the summary a GEECS `status`
 variable wants: `Not referenced` (bit 16 clear), `Homing` (bit 19, or an
-`INI` this IOC sent and `#5` still non-zero), `Moving` (`#5`), `Ready`. While
-the word says not referenced the driver refuses every `MOV` with an error and
-sends nothing (`checkReferenced`). After a controller power cycle the
+`INI` this IOC sent and `#5` still non-zero), `Moving` (`#5`), `Ready`. A
+pass whose `#5` or `#4` fails leaves the four records INVALID until the next
+good one. While the word says not referenced, and while a reference run is
+in progress, the driver refuses every `MOV` with an error and sends nothing
+(`checkReferenced`: a VAL, a deferred set, a jog). After a controller power cycle the
 platform is not referenced: `$(P)INIT` (a bo, HIGH 1 s) sends `INI`, the one
 reference run for every axis (positions become 0; the platform moves to its
 reference pose), and so do the record's HOMF/HOMR on any axis, both only with
 `home_allowed` and never while the platform moves; a refusal is a line in the
 IOC log and `STATE` unchanged (the bo's write alarm lasts until HIGH resets
 it, the motor record raises none). `auto_init` sends it once at creation when
-the word says not referenced, as the LabVIEW device does at its start. `INI` goes without an
+the word says not referenced, as the LabVIEW device does at its start, after
+the six axes have asked their init queries (so they neither race the run nor
+time out on a controller silent during it). `INI` goes without an
 axis identifier (PI's doc text for INI on the M-8X0 and F-206: "All axes =
 TRUE, Axis identifier = FALSE"; upstream sent `INI X`), and the same text
 warns that a motion started by `INI` may not be stoppable by `#24`.
@@ -614,11 +618,11 @@ below the line:
 | `PIHexapodPosWithChar3` | 1: `#3` probed at init and used for positions while moving | 0: `#3` never sent; positions while moving come from `POS? <axis>` (upstream's single-byte read cannot take a multi-line reply: see the gaps) |
 | `PIHexapodJogAllowed` | 1: JOGF/JOGR send `MOV <axis> <travel limit>`, no `VMO` | 0: refused with an error, nothing sent |
 | `PIHexapodSetPosAllowed` | 1: SET (position redefine) sends `RON <axis> 0`, `POS <axis> <v>`, `RON <axis> 1` | 0: refused with an error, nothing sent |
-| `PIHexapodAutoInit` | 0: nothing (upstream has no such step) | 1: `INI` once at creation when `#4` says not referenced (the LabVIEW device's start-up step); needs `PIHexapodHomeAllowed` 1 |
+| `PIHexapodAutoInit` | 0: nothing (upstream has no such step) | 1: `INI` once at creation, after the axes' init queries, when `#4` says not referenced (the LabVIEW device's start-up step); needs `PIHexapodHomeAllowed` 1 |
 | `getStatus` servo state | left uninitialized (random problem bit) | the state the driver knows (fix, no switch) |
 | `INI` | `INI X` | `INI` with no axis identifier: PI's doc text for the M-8X0 and F-206 (an identifier names the separate axes A, B) (fix, no switch) |
-| `#4` | read per axis at init and after a home | also once per poll pass, for the controller-level records and every axis's homed bit (fix, no switch) |
-| a `MOV` while not referenced | sent (the controller's answer unknown) | refused with an error, nothing sent (fix, no switch) |
+| `#4` | read per axis at init and after a home | also once per poll pass and after every `MOV`, for the controller-level records and every axis's homed bit; a failed read marks the records INVALID (fix, no switch) |
+| a `MOV` while not referenced, or during the reference run | sent (the controller's answer unknown) | refused with an error, nothing sent: a VAL, a deferred set or a jog (fix, no switch) |
 | `PIasynAxis::setIntegerParam` | `asynMotorAxis`'s, which writes the aggregate `motorStatus_` parameter on every call and writes 0 for a parameter outside the status-bit range; `poll()` ends with one (`PI_SUP_SERVO`), so the record's init read of the status got 0 and MSTA stayed 0 until the first status callback (the first move) | parameters outside the range go to the parameter library directly; MSTA reads right from init (fix, no switch) |
 | position counts | `int(x + 0.5)`: truncation toward zero reads -0.46 as -0.4599 | rounded to nearest (fix, no switch) |
 | target counts | the record's counts (a double, 17.7 / 1e-4 = 176999.99999999997) truncated to int in `move` and in the deferred-move array: `MOV Y 17.699900` for a 17.7 target | rounded to nearest (fix, no switch) |
@@ -660,8 +664,9 @@ pivot setters and `PI_SupportError.db`'s `CLEAR_ERR` are not loaded).
   0. Whether this controller answers during its reference run is for the
   bench to show (PI's "INI hexaxes and wait until finished" VI polls `#4`
   during it).
-- **Positions** come from `POS? <axis>`, six round trips per poll at 57600
-  baud, idle and moving alike (with `pos_with_char3` false).
+- **Positions** come from `POS? <axis>`, twelve round trips per poll pass
+  at 57600 baud (the driver reads each axis twice, as counts and as units),
+  idle and moving alike (with `pos_with_char3` false).
 - **The `VMO` check covers target mode 0 only** (`MOV`); the driver's MRT/MRW
   modes go unchecked, and no record in `PIHexapodCtrl.db` sets a mode.
 - **A stop during `INI`** sends `#24` like any stop; PI's doc text says a

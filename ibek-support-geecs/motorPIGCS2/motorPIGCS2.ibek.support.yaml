@@ -14,10 +14,11 @@ entity_models:
     description: |-
       PI's old "Hexapod" controller over a geecsSerial.Port (57600 8N1, no
       handshake, LF; the driver sets the asyn port's terminators itself).
-      Creation sends *IDN?, VEL?, #4, SPI? RST (and #3 only with
-      pos_with_char3), then per axis VEL?, POS? and #4; the switches below
-      decide the rest (README). Every poll pass sends #5 and #4, then POS?
-      per axis. PIHexapodCtrl.db gives the controller its records: DEFER,
+      Creation sends *IDN?, CSV? (unanswered on GCS-1: a 5 s timeout), VEL?,
+      #4, SPI? RST (and #3 only with pos_with_char3), ERR?, then per axis
+      SVO?, VEL?, POS? and #4; the switches below decide the rest (README).
+      Every poll pass sends #5 and #4, then POS? per axis (twice: counts,
+      then units). PIHexapodCtrl.db gives the controller its records: DEFER,
       STATUS_WORD / REFERENCED / INITIALISING / STATE (the #4 word and its
       summary) and INIT (the reference run), the pivot readbacks, LAST_ERR.
     parameters:
@@ -65,8 +66,8 @@ entity_models:
         type: bool
         description: |-
           true: at creation, when #4 reports not referenced (bit 16 clear),
-          send INI once, as the LabVIEW device does at its start; needs
-          home_allowed. false (upstream has no such step): the IOC reports
+          send INI once, after the axes' init queries, as the LabVIEW device
+          does at its start; needs home_allowed. false (upstream has no such step): the IOC reports
           Not referenced and refuses moves until INIT is written. Applies to
           every PI hexapod controller in the IOC.
         default: false
