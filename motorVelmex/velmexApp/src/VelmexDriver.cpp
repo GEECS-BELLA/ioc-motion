@@ -319,7 +319,7 @@ asynStatus VelmexController::poll()
 VelmexAxis::VelmexAxis(VelmexController *pC, int axisNo)
   : asynMotorAxis(pC, axisNo),
     pC_(pC), motor_(axisNo + 1), encoder_(0), eres_(1.0), accelSetting_(0), homeBackoff_(0), limitsActiveLow_(1),
-    moving_(0), homing_(0), homed_(0), homeForwards_(0), multiIndex_(0), lastSteps_(0), encoderOk_(0), settling_(0), settleValue_(0.0)
+    moving_(0), homing_(0), homed_(0), homeForwards_(0), multiIndex_(0), lastSteps_(0), encoderOk_(0), settling_(0), settleValue_(0.0), settleHave_(0)
 {
   setIntegerParam(pC_->motorStatusHasEncoder_, 0);
   setIntegerParam(pC_->motorStatusGainSupport_, 0);
@@ -403,6 +403,15 @@ asynStatus VelmexAxis::move(double position, int relative, double minVelocity, d
               driverName, functionName, motor_, pC_->vroStatus_);
     return asynError;
   }
+  if (settling_) {
+    /* The record ends a program on a limit switch by its own rule before the
+     * readout has settled (a home); a move computed from the stale reading
+     * would be phase B's overshoot again. */
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+              "%s:%s: motor %d: the readout has not settled since the last program: no reference yet, move refused\n",
+              driverName, functionName, motor_);
+    return asynError;
+  }
   asynStatus status = pC_->readSteps(motor_, &now);
   if (status) return status;
   lastSteps_ = now;
@@ -468,11 +477,13 @@ asynStatus VelmexAxis::stop(double acceleration)
   /* Only a program of ours can be stopped. The record sends STOP on an idle
    * axis too ("just in case"), and the idle VXM is in Local mode, where D is
    * the digitizer dump (Appendix H: two position lines), not a stop. */
-  if (pC_->online_ && (pC_->busy() || (moving_ && settling_ == 0))) {
+  /* A fresh V: the last poll's letter is up to a poll old, and the front-panel
+   * Run button can start the stored program at any time. */
+  if (pC_->readStatus() == asynSuccess && pC_->online_ && pC_->busy()) {
     /* Our own program: D for a one-index move (the program then ends), K for
      * the two-index home. A program this IOC did not start (an IOC restarted
-     * mid-program): K, since D would only end its current index. */
-    status = pC_->writeVxm((multiIndex_ || !moving_) ? "K" : "D");
+     * mid-program, the Run button): K, since D would only end its current index. */
+    status = pC_->writeVxm((multiIndex_ || !moving_ || settling_) ? "K" : "D");
   } else {
     asynPrint(pasynUser_, ASYN_TRACE_FLOW, "%s:%s: motor %d: no program running; nothing sent\n",
               driverName, functionName, motor_);
@@ -549,6 +560,7 @@ asynStatus VelmexAxis::poll(bool *moving)
      * a second apart, so the test is time-based: a move ends when the readout
      * has read the same value (within VELMEX_SETTLE_COUNTS) for VELMEX_SETTLE_S
      * since the VXM idled, or VELMEX_SETTLE_MAX_S after it idled regardless. */
+    if (pC_->busy()) settling_ = 0;        /* running again (the front-panel Run button): a new settle later */
     if (moving_ && !pC_->busy()) {
       epicsTimeStamp now;
       int settled = 0;
@@ -556,9 +568,11 @@ asynStatus VelmexAxis::poll(bool *moving)
       if (!encoder_ || !pC_->pasynUserEncoder_) {
         settled = 1;
       } else {
-        if (!settling_) { settling_ = 1; idleStart_ = now; settleStart_ = now; settleValue_ = encRead ? value / eres_ : 0.0; }
-        else if (encRead && fabs(value / eres_ - settleValue_) > VELMEX_SETTLE_COUNTS) { settleStart_ = now; settleValue_ = value / eres_; }
-        if (encRead && epicsTimeDiffInSeconds(&now, &settleStart_) >= VELMEX_SETTLE_S) {
+        if (!settling_) { settling_ = 1; idleStart_ = now; settleHave_ = 0; }
+        if (encRead && (!settleHave_ || fabs(value / eres_ - settleValue_) > VELMEX_SETTLE_COUNTS)) {
+          settleStart_ = now; settleValue_ = value / eres_; settleHave_ = 1;   /* the clock runs from a reading */
+        }
+        if (encRead && settleHave_ && epicsTimeDiffInSeconds(&now, &settleStart_) >= VELMEX_SETTLE_S) {
           settled = 1;
         } else if (epicsTimeDiffInSeconds(&now, &idleStart_) >= VELMEX_SETTLE_MAX_S) {
           asynPrint(pasynUser_, ASYN_TRACE_ERROR,

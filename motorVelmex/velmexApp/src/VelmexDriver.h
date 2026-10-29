@@ -65,6 +65,7 @@ private:
   int encoderOk_;          /**< The readout answered on the last poll: a reference exists */
   int settling_;           /**< 1 while the VXM is idle and the readout has not settled yet */
   double settleValue_;     /**< The readout value (counts) the settle clock is measuring from */
+  int settleHave_;         /**< settleValue_ holds a reading of this settle (the first poll may have none) */
   epicsTimeStamp settleStart_;  /**< When settleValue_ was first read */
   epicsTimeStamp idleStart_;    /**< When the VXM was first seen idle after this move */
   int homing_;             /**< The running program is a home */

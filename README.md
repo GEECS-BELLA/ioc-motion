@@ -589,7 +589,13 @@ value (within 2 counts) for 1.5 s, or 10 s after the VXM idled regardless
 about a second, a retry judged against the stale value overshot by 90 mm
 (phase B, 2026-10-29), and a display refreshed once a second can read the
 same stale value on two polls half a second apart, so the wait is by the
-clock, not by the poll count. Every program is preceded by a fresh `V`: one sent
+clock, not by the poll count. A move commanded before the readout has
+settled is refused (the record ends a program on a limit switch by its own
+rule, before the settle: a move within about 1.5 s of a home is refused, and
+the record's own retry re-issues it once the readout has settled, counted
+in RCNT). A stop reads `V` afresh
+and kills (`K`) any program it did not start, the front-panel Run button's
+included. Every program is preceded by a fresh `V`: one sent
 to a running VXM would replace the program it is running.
 The readout's power-up start menu answers no position either (`V` says `P`);
 `F` then `Q` on its line takes it to Display mode, which the snapshot's
@@ -651,8 +657,9 @@ simultaneous motion of two motors (`(i1,i2)`) is not used; the readout's
 on its line) stops the position readback — the driver reports it and sends
 no mode command; the snapshot script's `--identity` pass does. The hardware
 snapshot of 2026-10-29 (geecs-epics `services/vxmtest1`) settled the
-Local-mode command set and the readout's reply format; the limit polarity
-and MRES wait for the motion phase.
+Local-mode command set and the readout's reply format; the motion phase
+measured MRES (0.2503 mm per step) and found the readout's display lag; the
+limit polarity waits for a switch.
 
 ## Licence
 
