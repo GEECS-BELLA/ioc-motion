@@ -253,7 +253,12 @@ no motion, with `init_writes` false) and the motion command, as before. So an
 `on_for_move` move on the wire is `ENABLE`, `onDelay`, `RAMP MODE @n RATE`,
 `WAIT MODE NOWAIT`, `ABS`, `RAMP RATE`, `LINEAR`, end of motion, `offDelay`,
 `DISABLE`, and DMOV goes 1 after the `DISABLE` is acknowledged: a scan waiting
-on DMOV never fires with the axis enabled. Details:
+on DMOV does not fire with the axis enabled. The exceptions, where the motor
+record ends the move itself (PROBLEM or a limit switch, motorRecord.cc
+L3741-L3746): a controller fault during the motion is disabled at once, in the
+poll that sees it, before DMOV; an `AXISFAULT` read that is not acknowledged,
+or a limit switch reached without a controller fault, ends DMOV while the axis
+is still held, and the disable follows `offDelay` later. Details:
 
 - **Boot, idle poll, IOC exit**: unchanged, queries only, under every policy.
   An axis found enabled at boot stays so until its first `on_for_move` move
@@ -275,13 +280,19 @@ on DMOV never fires with the axis enabled. Details:
   motion or CNEN put (the poll's own fault check would otherwise clear it).
 - **Done is plane-wide** (`PLANESTATUS(0)`, upstream): another axis moving in
   plane 0 delays this axis's `offDelay` and its DMOV.
-- **New motion inside the off window**: the record still reads not done, so a
-  new VAL is a retarget (the record stops, waits for done, then moves): the axis
-  is disabled in between. `on_for_move` wants `BDST` 0 and `RTRY` 0 (the
+- **New motion during a move or its off window**: the record still reads not
+  done, so a new VAL (or a jog) is a retarget (the record stops, waits for done,
+  then moves): `ABORT`, `offDelay`, `DISABLE`, `ENABLE`, `onDelay`, the move. `on_for_move` wants `BDST` 0 and `RTRY` 0 (the
   entity's defaults): a backlash or retry move power-cycles the axis.
+- **Home**: the off delay starts only once `AXISSTATUS` shows neither
+  `move_active` nor `homing_active` (HomeAsync.bcx runs several moves); not yet
+  checked against the controller's home program.
 - **Limits checked at boot** (`EnsembleAxisPower` prints and sets the iocsh
-  error, so `on error halt` stops the IOC): policy one of the three;
-  `onDelay` 0..1 s (it holds the axis mutex and blocks that axis's poll);
+  error; the entity renders `on error halt` before it, so a refused policy
+  halts the IOC rather than booting as `leave`, and the command is refused
+  after iocInit): policy one of the three; `onDelay` 0..1 s (it sleeps in the
+  controller's asyn port thread with the axis mutex held: every command to
+  that controller, a STOP of another axis included, and the poll wait);
   `on_for_move` needs `offDelay` ≥ the moving poll period (a shorter one can
   take a not-yet-started motion for its end).
 - **Locking**: for a non-`leave` axis the axis mutex is held from the enable

@@ -229,20 +229,25 @@ entity_models:
         type: float
         description: |-
           Seconds after an ENABLE the driver sent, before the motion command
-          (0..1: it blocks this axis's poll). on_for_move and keep_on only.
+          (0..1). It sleeps in the controller's port thread with the axis mutex
+          held: every command to this controller (a STOP of another axis
+          included) and the poll wait. on_for_move and keep_on only.
         default: 0
       power_off_delay:
         type: float
         description: |-
           Seconds from the end of motion to DISABLE (on_for_move only), at
           least the controller's moving poll period; it is also settling time
-          before DMOV. No useful default: an on_for_move axis sets it.
+          before DMOV. No useful default: an on_for_move axis sets it, and the
+          driver refuses (the IOC halts) a value below the moving poll period.
         default: 0
 
     pre_init:
       - value: |
           {% if power_policy != 'leave' %}
-          # EnsembleAxisPower(card, driver axis, policy, on delay s, off delay s): ioc-motion's power-policy patch
+          # EnsembleAxisPower(card, driver axis, policy, on delay s, off delay s): ioc-motion's power-policy patch.
+          # A policy the driver refuses must not boot as leave: halt on its error (from here on).
+          on error halt
           EnsembleAxisPower({{controller.card}}, {{addr}}, "{{power_policy}}", {{power_on_delay}}, {{power_off_delay}})
           {% endif %}
 
