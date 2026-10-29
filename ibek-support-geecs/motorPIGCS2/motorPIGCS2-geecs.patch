@@ -13,16 +13,26 @@ index cc4d4ee..840d48a 100644
  DB += PI_SupportCL.db
 diff --git a/pigcs2App/Db/PIHexapodCtrl.db b/pigcs2App/Db/PIHexapodCtrl.db
 new file mode 100644
-index 0000000..b11c50b
+index 0000000..e87aadb
 --- /dev/null
 +++ b/pigcs2App/Db/PIHexapodCtrl.db
-@@ -0,0 +1,55 @@
-+# ioc-motion: the per-controller records of a PI hexapod that an IOC which only
-+# sets positions needs: DEFER (the motor record's deferred moves: every axis's
-+# VAL written while ON, then OFF, is one six-axis MOV), the pivot point as read
-+# from the controller at init (SPI? RST: X Y Z here are PI's R S T) and the
-+# driver's last GCS error. The pivot setters and CLEAR_ERR of upstream's
-+# PI_SupportCtrl.db / PI_SupportError.db are left out on purpose.
+@@ -0,0 +1,119 @@
++# ioc-motion: the per-controller records of a PI hexapod that an IOC which sets
++# positions and starts the reference run needs: DEFER (the motor record's
++# deferred moves: every axis's VAL written while ON, then OFF, is one six-axis
++# MOV), the controller's #4 status word and what it says (REFERENCED,
++# INITIALISING, the four-state STATE), INIT (the reference run, INI, every
++# axis; refused, nothing sent, when the driver's PIHexapodHomeAllowed is 0 or
++# the platform moves: the IOC log says so and STATE stays as it was, while the
++# bo's write alarm lasts only until HIGH resets it), the pivot point as read
++# from the controller at init
++# (SPI? RST: X Y Z here are PI's R S T) and the driver's last GCS error. The
++# pivot setters and CLEAR_ERR of upstream's PI_SupportCtrl.db /
++# PI_SupportError.db are left out on purpose.
++#
++# The GEECS device's two state variables map one to one: hexinit (Not
++# referenced / Referenced; its set is INI) = REFERENCED + INIT, status (Not
++# referenced / Homing / Moving / Ready) = STATE.
 +record(bo, "$(P)DEFER") {
 +  field(DTYP, "asynInt32")
 +  field(OUT, "@asynMask($(PORT),0,0)MOTOR_DEFER_MOVES")
@@ -63,6 +73,60 @@ index 0000000..b11c50b
 +	field(PREC, "3")
 +	field(EGU, "mm")
 +	field(SCAN, "I/O Intr")
++}
++
++record(longin, "$(P)STATUS_WORD")
++{
++	field(DESC, "#4 status word, decimal")
++	field(DTYP, "asynInt32")
++	field(INP, "@asyn($(PORT),0,0)PI_HEX_STATUS_WORD")
++	field(SCAN, "I/O Intr")
++}
++
++record(bi, "$(P)REFERENCED")
++{
++	field(DESC, "#4 bit 16 (hexinit)")
++	field(DTYP, "asynInt32")
++	field(INP, "@asyn($(PORT),0,0)PI_HEX_REFERENCED")
++	field(ZNAM, "Not referenced")
++	field(ONAM, "Referenced")
++	field(SCAN, "I/O Intr")
++}
++
++record(bi, "$(P)INITIALISING")
++{
++	field(DESC, "#4 bit 19")
++	field(DTYP, "asynInt32")
++	field(INP, "@asyn($(PORT),0,0)PI_HEX_INITIALISING")
++	field(ZNAM, "No")
++	field(ONAM, "Initialising")
++	field(SCAN, "I/O Intr")
++}
++
++record(mbbi, "$(P)STATE")
++{
++	field(DESC, "Controller state (status)")
++	field(DTYP, "asynInt32")
++	field(INP, "@asyn($(PORT),0,0)PI_HEX_STATE")
++	field(ZRVL, "0")
++	field(ZRST, "Not referenced")
++	field(ONVL, "1")
++	field(ONST, "Homing")
++	field(TWVL, "2")
++	field(TWST, "Moving")
++	field(THVL, "3")
++	field(THST, "Ready")
++	field(SCAN, "I/O Intr")
++}
++
++record(bo, "$(P)INIT")
++{
++	field(DESC, "Reference run: INI, every axis")
++	field(DTYP, "asynInt32")
++	field(OUT, "@asyn($(PORT),0,0)PI_HEX_INIT")
++	field(ZNAM, "")
++	field(ONAM, "Init")
++	field(HIGH, "1")
 +}
 +
 +record(longin, "$(P)LAST_ERR")
@@ -126,20 +190,35 @@ index a173e52..8234f4f 100644
      if (m_pInterface->m_pCurrentLogSink != NULL)
      {
      	asynPrint(m_pInterface->m_pCurrentLogSink, ASYN_TRACE_FLOW,
+diff --git a/pigcs2App/src/PIGCSController.h b/pigcs2App/src/PIGCSController.h
+index 65ce11a..5422ec9 100644
+--- a/pigcs2App/src/PIGCSController.h
++++ b/pigcs2App/src/PIGCSController.h
+@@ -74,6 +74,9 @@ public:
+     virtual asynStatus hasLimitSwitches(PIasynAxis* pAxis);
+     virtual asynStatus hasReferenceSensor(PIasynAxis* pAxis);
+     virtual asynStatus getReferencedState(PIasynAxis* axis);
++    // ioc-motion: a controller-level status word and its summary, for the controllers that have
++    // one (the hexapod's #4); asynError = none, the records stay untouched
++    virtual asynStatus getControllerState(int& statusWord, int& referenced, int& initialising, int& state) { return asynError; }
+ 	virtual asynStatus setEnableAxis(PIasynAxis* pAxis, int axisEnableState);
+ 	virtual asynStatus getEnableAxis(PIasynAxis* pAxis, int& axisEnableState);
+ 
 diff --git a/pigcs2App/src/PIHexapodController.cpp b/pigcs2App/src/PIHexapodController.cpp
-index 2f7f0d6..28917e5 100644
+index 2f7f0d6..f674e5c 100644
 --- a/pigcs2App/src/PIHexapodController.cpp
 +++ b/pigcs2App/src/PIHexapodController.cpp
-@@ -15,7 +15,48 @@ Original Author: Steffen Rau
+@@ -15,7 +15,54 @@ Original Author: Steffen Rau
  #include "PIasynAxis.h"
  #include "PIInterface.h"
  #include <stdlib.h>
 +#include <string.h>
  #include <epicsThread.h>
 +#include <epicsString.h>
++#include <errlog.h>
 +#include <epicsExport.h>
 +
-+// ioc-motion (GEECS-BELLA): four iocsh variables, each defaulting to upstream's
++// ioc-motion (GEECS-BELLA): eight iocsh variables, each defaulting to upstream's
 +// behaviour; `variable()` lines in PI_GCS2Support.dbd make them settable from
 +// st.cmd before the controller is created.
 +//   PIHexapodInitServo   1: SVO <axis> 1 per axis at init (a write at every IOC start);
@@ -160,6 +239,9 @@ index 2f7f0d6..28917e5 100644
 +//                        0: refused with an error, nothing sent.
 +//   PIHexapodSetPosAllowed 1: the record's SET redefines the position (RON 0, POS, RON 1);
 +//                        0: refused with an error, nothing sent.
++//   PIHexapodAutoInit    0: nothing (upstream has no such step);
++//                        1: at init, when #4 reports not referenced (bit 16 clear), send INI
++//                        (the LabVIEW device's start-up behaviour); needs PIHexapodHomeAllowed 1.
 +int PIHexapodInitServo = 1;
 +int PIHexapodHomeAllowed = 1;
 +int PIHexapodVmoCheck = 0;
@@ -167,6 +249,7 @@ index 2f7f0d6..28917e5 100644
 +int PIHexapodPosWithChar3 = 1;
 +int PIHexapodJogAllowed = 1;
 +int PIHexapodSetPosAllowed = 1;
++int PIHexapodAutoInit = 0;
 +extern "C" {
 +epicsExportAddress(int, PIHexapodInitServo);
 +epicsExportAddress(int, PIHexapodHomeAllowed);
@@ -175,11 +258,19 @@ index 2f7f0d6..28917e5 100644
 +epicsExportAddress(int, PIHexapodPosWithChar3);
 +epicsExportAddress(int, PIHexapodJogAllowed);
 +epicsExportAddress(int, PIHexapodSetPosAllowed);
++epicsExportAddress(int, PIHexapodAutoInit);
 +}
  
  //#undef asynPrint
  //#define asynPrint(user,reason,format...) 0
-@@ -40,15 +81,22 @@ asynStatus PIHexapodController::init(void)
+@@ -34,27 +81,50 @@ asynStatus PIHexapodController::init(void)
+     if (status == asynSuccess)
+     {
+         m_bCanReadStatusWithChar4 = true;
++        parseStatusWord(buf);   // ioc-motion: referenced / initialising from the probe's answer
+     }
+     else if (status == asynTimeout)
+     {
          m_bCanReadStatusWithChar4 = false;
          getGCSError(); // clear error UNKNOWN COMMAND
      }
@@ -208,7 +299,48 @@ index 2f7f0d6..28917e5 100644
      }
  
      m_bHoming = false;
-@@ -93,6 +141,7 @@ asynStatus PIHexapodController::getStatus(PIasynAxis* pAxis, int& homing, int& m
+ 
+     ReadPivotSettings();
+ 
++    // ioc-motion: PIHexapodAutoInit = the LabVIEW device's start-up step: INI when, and only
++    // when, the controller reports not referenced. Off by default; the instance decides.
++    if (PIHexapodAutoInit && m_bCanReadStatusWithChar4 && !m_bReferenced)
++    {
++        errlogPrintf("PIHexapodController::init() the controller reports not referenced (#4 = %ld), PIHexapodAutoInit is 1: INI\n", m_statusWord);
++        if (startReferenceRun(NULL) != asynSuccess)
++        {
++            errlogPrintf("PIHexapodController::init() auto-init: INI not sent\n");
++        }
++    }
++    else if (m_bCanReadStatusWithChar4 && !m_bReferenced)
++    {
++        errlogPrintf("PIHexapodController::init() the controller reports not referenced (#4 = %ld); moves are refused until INI\n", m_statusWord);
++    }
++
+     return status;
+ }
+ 
+@@ -78,6 +148,19 @@ return status;
+     {
+         m_bHoming = false;
+     }
++    // ioc-motion: the status word on every pass: bit 16 (referenced) for every axis's homed bit
++    // and the records, bit 19 (initialising) as the controller's own word for a reference run
++    if (m_bCanReadStatusWithChar4 && readStatusWord() == asynSuccess)
++    {
++        for (int i=0; i<numAxes; i++)
++        {
++            ((PIasynAxis*)pAxes[i])->m_homed = m_bReferenced ? 1 : 0;
++        }
++        if (m_bInitialising)
++        {
++            m_bHoming = true;
++        }
++    }
+     for(int i=0; i<numAxes; i++)
+     {
+         ((PIasynAxis*)pAxes[i])->m_bMoving = (moving != 0);
+@@ -93,6 +176,7 @@ asynStatus PIHexapodController::getStatus(PIasynAxis* pAxis, int& homing, int& m
         homing = m_bHoming ? 1:0;
  
         moving = pAxis->m_bMoving || pAxis->deferred_move;
@@ -216,7 +348,7 @@ index 2f7f0d6..28917e5 100644
      return asynSuccess;
  }
  
-@@ -126,7 +175,57 @@ asynStatus PIHexapodController::findConnectedAxes()
+@@ -126,7 +210,57 @@ asynStatus PIHexapodController::findConnectedAxes()
  asynStatus PIHexapodController::initAxis(PIasynAxis* pAxis)
  {
      pAxis->m_movingStateMask = 1;
@@ -275,10 +407,27 @@ index 2f7f0d6..28917e5 100644
  }
  
  asynStatus PIHexapodController::getReferencedState(PIasynAxis* pAxis)
-@@ -163,6 +262,15 @@ asynStatus PIHexapodController::moveCts( PIasynAxis* pAxis, int targetCts )
+@@ -143,8 +277,8 @@ asynStatus PIHexapodController::getReferencedState(PIasynAxis* pAxis)
+     {
+         return status;
+     }
+-    long mask = strtol(buf, NULL, 10);
+-    pAxis->m_homed = (mask & 0x10000) ? 1 : 0;
++    parseStatusWord(buf);   // ioc-motion: the same word feeds the controller-level records
++    pAxis->m_homed = m_bReferenced ? 1 : 0;
+     return status;
+ }
+ 
+@@ -163,6 +297,21 @@ asynStatus PIHexapodController::moveCts( PIasynAxis* pAxis, int targetCts )
          double relative = double(targetCts - pAxis->m_positionCts) * pAxis->m_CPUdenominator / pAxis->m_CPUnumerator;
          sprintf(cmd,"MRW %s %f", pAxis->m_szAxisName, relative);
      }
++    // ioc-motion: not referenced = no move
++    status = checkReferenced(pAxis);
++    if (asynSuccess != status)
++    {
++        return status;
++    }
 +    if (m_targetMode == 0)
 +    {
 +        // ioc-motion: the same axis and target as the MOV, after the command word
@@ -291,11 +440,16 @@ index 2f7f0d6..28917e5 100644
      status = m_pInterface->sendOnly(cmd);
      if (asynSuccess != status)
      {
-@@ -206,6 +314,12 @@ asynStatus PIHexapodController::moveCts( PIasynAxis** pAxesArray, int* pTargetCt
+@@ -206,6 +355,17 @@ asynStatus PIHexapodController::moveCts( PIasynAxis** pAxesArray, int* pTargetCt
          strcat(cmd, subCmd);
          pAxis->m_lastDirection = (pTargetCtsArray[axis] > pAxis->m_positionCts) ? 1 : 0;
      }
-+    // ioc-motion: the same targets as the MOV, after the command word
++    // ioc-motion: not referenced = no move; then the same targets as the MOV, after the command word
++    status = checkReferenced(numAxes > 0 ? pAxesArray[0] : NULL);
++    if (asynSuccess != status)
++    {
++        return status;
++    }
 +    status = checkMovePossible(numAxes > 0 ? pAxesArray[0] : NULL, cmd + 3);
 +    if (asynSuccess != status)
 +    {
@@ -304,7 +458,7 @@ index 2f7f0d6..28917e5 100644
      status = m_pInterface->sendOnly(cmd);
      if (asynSuccess != status)
      {
-@@ -235,8 +349,10 @@ asynStatus PIHexapodController::moveCts( PIasynAxis** pAxesArray, int* pTargetCt
+@@ -235,8 +395,10 @@ asynStatus PIHexapodController::moveCts( PIasynAxis** pAxesArray, int* pTargetCt
  asynStatus PIHexapodController::getAxisPosition(PIasynAxis* pAxis, double& position)
  {
      //m_pInterface->m_pCurrentLogSink = m_pInterface;
@@ -316,7 +470,7 @@ index 2f7f0d6..28917e5 100644
          return PIGCSController::getAxisPosition(pAxis, position);
      }
      if (m_bCanReadPosWithChar3)
-@@ -424,8 +540,49 @@ asynStatus PIHexapodController::ReadPivotSettings()
+@@ -424,20 +586,146 @@ asynStatus PIHexapodController::ReadPivotSettings()
      return status;
  }
  
@@ -351,26 +505,143 @@ index 2f7f0d6..28917e5 100644
 +
  asynStatus PIHexapodController::referenceVelCts( PIasynAxis* pAxis, double velocity, int forwards)
  {
+-    asynStatus status = m_pInterface->sendOnly("INI X");
++    // the record's HOMF/HOMR on any axis: the hexapod has one reference run, for every axis
++    return startReferenceRun(pAxis);
++}
++
++asynStatus PIHexapodController::startReferenceRun(PIasynAxis* pAxis)
++{
++    asynUser* log = (pAxis && pAxis->m_pasynUser) ? pAxis->m_pasynUser : m_pInterface->m_pCurrentLogSink;
 +    if (!PIHexapodHomeAllowed)
 +    {
 +        // ioc-motion: the hexapod's reference run (INI) is not this IOC's to start
-+        asynPrint(m_pInterface->m_pCurrentLogSink, ASYN_TRACE_ERROR,
-+                "PIHexapodController::referenceVelCts() refused: PIHexapodHomeAllowed is 0, INI not sent\n");
-+        if (NULL != pAxis->m_pasynUser)
-+        {
++        if (log)
++            asynPrint(log, ASYN_TRACE_ERROR,
++                "PIHexapodController::startReferenceRun() refused: PIHexapodHomeAllowed is 0, INI not sent\n");
++        else
++            errlogPrintf("PIHexapodController::startReferenceRun() refused: PIHexapodHomeAllowed is 0, INI not sent\n");
++        if (pAxis && pAxis->m_pasynUser)
 +            epicsSnprintf(pAxis->m_pasynUser->errorMessage, pAxis->m_pasynUser->errorMessageSize,
 +                "home refused: PIHexapodHomeAllowed is 0 (INI is not this IOC's to send)");
-+        }
 +        return asynError;
 +    }
-     asynStatus status = m_pInterface->sendOnly("INI X");
++    if (m_bAnyAxisMoving)
++    {
++        if (log)
++            asynPrint(log, ASYN_TRACE_ERROR,
++                "PIHexapodController::startReferenceRun() refused: the platform is moving, INI not sent\n");
++        if (pAxis && pAxis->m_pasynUser)
++            epicsSnprintf(pAxis->m_pasynUser->errorMessage, pAxis->m_pasynUser->errorMessageSize,
++                "INI refused: the platform is moving");
++        return asynError;
++    }
++    // ioc-motion: "INI" with no axis identifier. PI's doc text for INI on the M-8X0 and the F-206
++    // (the GCS LabVIEW library, INI.vi): "All axes = TRUE, Axis identifier = FALSE"; an identifier
++    // names the separate axes A, B. Upstream sent "INI X". The same text warns that a motion
++    // started by INI may not be stoppable by #24.
++    asynStatus status = m_pInterface->sendOnly("INI");
      if (asynSuccess != status)
      {
+         int errorCode = getGCSError();
+-       asynPrint(m_pInterface->m_pCurrentLogSink, ASYN_TRACE_ERROR,
+-                "PIHexapodController::referenceVelCts() failed\n");
+-        epicsSnprintf(pAxis->m_pasynUser->errorMessage,pAxis->m_pasynUser->errorMessageSize,
+-            "PIHexapodController::referenceVelCts() failed - GCS Error %d\n",errorCode);
++        if (log)
++            asynPrint(log, ASYN_TRACE_ERROR,
++                "PIHexapodController::startReferenceRun() failed - GCS error %d\n", errorCode);
++        if (pAxis && pAxis->m_pasynUser)
++            epicsSnprintf(pAxis->m_pasynUser->errorMessage, pAxis->m_pasynUser->errorMessageSize,
++                "INI failed - GCS Error %d", errorCode);
+         return status;
+     }
+     m_bHoming = true;
+-     return asynSuccess;
++    m_bAnyAxisMoving = true;   // the platform moves until #5 reads 0
++    return asynSuccess;
++}
++
++// ioc-motion: the #4 status word (decimal; strtol base 10 as upstream's getReferencedState)
++void PIHexapodController::parseStatusWord(const char* buf)
++{
++    m_statusWord = strtol(buf, NULL, 10);
++    m_bReferenced = (m_statusWord & 0x10000) != 0;     // bit 16: hexapod initialized
++    m_bInitialising = (m_statusWord & 0x80000) != 0;   // bit 19: initialisation in progress
++    m_bStatusWordValid = true;
++}
++
++asynStatus PIHexapodController::readStatusWord()
++{
++    char buf[255];
++    asynStatus status = m_pInterface->sendAndReceive(char(4), buf, 99);
++    if (status != asynSuccess)
++    {
++        return status;
++    }
++    parseStatusWord(buf);
++    return asynSuccess;
++}
++
++// ioc-motion: no MOV while the controller reports not referenced (bit 16 of #4 clear); a
++// controller that does not answer #4 is not gated (upstream treats it as referenced).
++asynStatus PIHexapodController::checkReferenced(PIasynAxis* pAxis)
++{
++    if (!m_bCanReadStatusWithChar4 || m_bReferenced)
++    {
++        return asynSuccess;
++    }
++    asynUser* log = (pAxis && pAxis->m_pasynUser) ? pAxis->m_pasynUser : m_pInterface->m_pCurrentLogSink;
++    if (log)
++        asynPrint(log, ASYN_TRACE_ERROR,
++            "PIHexapodController::checkReferenced() refused: the hexapod is not referenced (#4 = %ld), MOV not sent; INI first\n",
++            m_statusWord);
++    if (pAxis && pAxis->m_pasynUser)
++        epicsSnprintf(pAxis->m_pasynUser->errorMessage, pAxis->m_pasynUser->errorMessageSize,
++            "move refused: the hexapod is not referenced (INI first)");
++    return asynError;
++}
++
++asynStatus PIHexapodController::getControllerState(int& statusWord, int& referenced, int& initialising, int& state)
++{
++    if (!m_bStatusWordValid)
++    {
++        return asynError;
++    }
++    statusWord = int(m_statusWord);
++    referenced = m_bReferenced ? 1 : 0;
++    initialising = m_bInitialising ? 1 : 0;
++    if (m_bHoming || m_bInitialising)
++        state = 1;   // homing: the reference run moves the platform
++    else if (!m_bReferenced)
++        state = 0;   // not referenced
++    else if (m_bAnyAxisMoving)
++        state = 2;   // moving
++    else
++        state = 3;   // ready
++    return asynSuccess;
+ }
+ 
+ asynStatus PIHexapodController::haltAxis(PIasynAxis* pAxis)
 diff --git a/pigcs2App/src/PIHexapodController.h b/pigcs2App/src/PIHexapodController.h
-index fc11048..c5a729c 100644
+index fc11048..f42b7f2 100644
 --- a/pigcs2App/src/PIHexapodController.h
 +++ b/pigcs2App/src/PIHexapodController.h
-@@ -31,10 +31,9 @@ public:
+@@ -24,6 +24,13 @@ class PIHexapodController : public PIGCSController
+ public:
+ 	PIHexapodController(PIInterface* pInterface, const char* szIDN)
+ 	: PIGCSController(pInterface, szIDN)
++	, m_bHoming(false)
++	, m_bCanReadStatusWithChar4(false)
++	, m_bCanReadPosWithChar3(false)
++	, m_statusWord(0)
++	, m_bStatusWordValid(false)
++	, m_bReferenced(false)
++	, m_bInitialising(false)
+ 	{
+ 	}
+ 	~PIHexapodController() {}
+@@ -31,10 +38,9 @@ public:
  	virtual asynStatus init(void);
  	virtual asynStatus initAxis(PIasynAxis* pAxis);
  
@@ -384,7 +655,18 @@ index fc11048..c5a729c 100644
  
  	virtual asynStatus setAccelerationCts( PIasynAxis* pAxis, double acceleration)	{ return asynSuccess; }
  	virtual asynStatus setAcceleration( PIasynAxis* pAxis, double acceleration)	{ return asynSuccess; }
-@@ -55,7 +54,12 @@ public:
+@@ -47,6 +53,10 @@ public:
+     	return asynSuccess;
+     }
+     virtual asynStatus getReferencedState(PIasynAxis* pAxis);
++    // ioc-motion: the controller's #4 status word as every poll pass reads it (getGlobalState):
++    // bit 16 referenced, bit 19 initialisation in progress (PI's doc text for the M-8X0), and a
++    // four-state summary for the records: 0 not referenced, 1 homing, 2 moving, 3 ready.
++    virtual asynStatus getControllerState(int& statusWord, int& referenced, int& initialising, int& state);
+ 
+ 	virtual asynStatus haltAxis(PIasynAxis* pAxis);
+ 
+@@ -55,7 +65,12 @@ public:
  
  	virtual asynStatus moveCts( PIasynAxis* pAxis, int target);
  	virtual asynStatus moveCts( PIasynAxis** pAxesArray, int* pTargetCtsArray, int numAxes);
@@ -397,11 +679,27 @@ index fc11048..c5a729c 100644
  
      virtual asynStatus SetPivotX(double value);
      virtual asynStatus SetPivotY(double value);
+@@ -82,6 +97,15 @@ protected:
+ private:
+     bool m_bCanReadStatusWithChar4;
+     bool m_bCanReadPosWithChar3;
++    // ioc-motion: the last #4 word and what it says; the reference run and its guards
++    long m_statusWord;
++    bool m_bStatusWordValid;
++    bool m_bReferenced;
++    bool m_bInitialising;
++    void parseStatusWord(const char* buf);
++    asynStatus readStatusWord();
++    asynStatus checkReferenced(PIasynAxis* pAxis);
++    asynStatus startReferenceRun(PIasynAxis* pAxis);
+ };
+ 
+ #endif /* PIHEXAPODCONTROLLER_H_ */
 diff --git a/pigcs2App/src/PI_GCS2Support.dbd b/pigcs2App/src/PI_GCS2Support.dbd
-index 8d3ca9e..2e9282b 100644
+index 8d3ca9e..66e779d 100644
 --- a/pigcs2App/src/PI_GCS2Support.dbd
 +++ b/pigcs2App/src/PI_GCS2Support.dbd
-@@ -2,3 +2,11 @@
+@@ -2,3 +2,12 @@
  ##driver(PIasyn)
  registrar(PIasynDriverRegister)
  ##registrar(PIasynRegister)
@@ -413,8 +711,9 @@ index 8d3ca9e..2e9282b 100644
 +variable(PIHexapodPosWithChar3, int)
 +variable(PIHexapodJogAllowed, int)
 +variable(PIHexapodSetPosAllowed, int)
++variable(PIHexapodAutoInit, int)
 diff --git a/pigcs2App/src/PIasynAxis.cpp b/pigcs2App/src/PIasynAxis.cpp
-index c725d90..1358558 100644
+index c725d90..0c64eb1 100644
 --- a/pigcs2App/src/PIasynAxis.cpp
 +++ b/pigcs2App/src/PIasynAxis.cpp
 @@ -51,7 +51,7 @@ PIasynAxis::PIasynAxis(PIasynController *pController, PIGCSController* pGCSContr
@@ -436,11 +735,57 @@ index c725d90..1358558 100644
     }
      epicsEventSignal(pController_->pollEventId_);
  
+@@ -362,4 +363,12 @@ asynStatus PIasynAxis::setPosition(double position)
+     return status;
+ }
+ 
+-
++asynStatus PIasynAxis::setIntegerParam(int function, int value)
++{
++    // ioc-motion: see PIasynAxis.h; the status bits keep asynMotorAxis's aggregate bookkeeping
++    if (function >= pController_->motorStatusDirection_ && function <= pController_->motorStatusHomed_)
++    {
++        return asynMotorAxis::setIntegerParam(function, value);
++    }
++    return pController_->setIntegerParam(axisNo_, function, value);
++}
+diff --git a/pigcs2App/src/PIasynAxis.h b/pigcs2App/src/PIasynAxis.h
+index ec83efb..2cac840 100644
+--- a/pigcs2App/src/PIasynAxis.h
++++ b/pigcs2App/src/PIasynAxis.h
+@@ -34,6 +34,13 @@ public:
+     int getAxisNo() { return axisNo_; }
+ 
+     virtual asynStatus poll(bool *moving);
++    // ioc-motion: asynMotorAxis::setIntegerParam writes the aggregate motorStatus_ parameter on
++    // EVERY call, and for a parameter outside the status-bit range it writes 0 (its local
++    // `status` starts at 0 and is only computed inside the range check). poll() ends with such a
++    // parameter (PI_SUP_SERVO), so motorStatus_ read 0 whenever a record asked for it, and the
++    // motor record's MSTA stayed 0 from init until the first status callback (the first move).
++    // Parameters outside the range go to the parameter library directly.
++    virtual asynStatus setIntegerParam(int function, int value);
+     virtual asynStatus move(double position, int relative, double minVelocity, double maxVelocity, double acceleration);
+     virtual asynStatus moveVelocity(double minVelocity, double maxVelocity, double acceleration);
+     virtual asynStatus home(double minVelocity, double maxVelocity, double acceleration, int forwards);
 diff --git a/pigcs2App/src/PIasynController.cpp b/pigcs2App/src/PIasynController.cpp
-index b993d1a..b1ccbc7 100644
+index b993d1a..f8985fc 100644
 --- a/pigcs2App/src/PIasynController.cpp
 +++ b/pigcs2App/src/PIasynController.cpp
-@@ -247,7 +247,7 @@ asynStatus PIasynController::processDeferredMoves()
+@@ -107,6 +107,13 @@ PIasynController::PIasynController(const char *portName, const char* asynPort, i
+     createParam(PI_CS_KST_String,           asynParamOctet,    &PI_CS_KST);
+     createParam(PI_CS_KSW_String,           asynParamOctet,    &PI_CS_KSW);
+ 
++    // ioc-motion: the hexapod's controller-level state (PIHexapodCtrl.db)
++    createParam(PI_HEX_STATUS_WORD_String,  asynParamInt32,    &PI_HEX_STATUS_WORD);
++    createParam(PI_HEX_REFERENCED_String,   asynParamInt32,    &PI_HEX_REFERENCED);
++    createParam(PI_HEX_INITIALISING_String, asynParamInt32,    &PI_HEX_INITIALISING);
++    createParam(PI_HEX_STATE_String,        asynParamInt32,    &PI_HEX_STATE);
++    createParam(PI_HEX_INIT_String,         asynParamInt32,    &PI_HEX_INIT);
++
+     if (!PIasynControllerListInitialized)
+     {
+         PIasynControllerListInitialized = 1;
+@@ -247,7 +254,7 @@ asynStatus PIasynController::processDeferredMoves()
          if (pAxis->deferred_move)
          {
          	pAxesArray[numDeferredAxes] = pAxis;
@@ -449,3 +794,80 @@ index b993d1a..b1ccbc7 100644
          	pAxis->setIntegerParam(motorStatusDone_, 0);
          	pAxis->callParamCallbacks();
          	numDeferredAxes++;
+@@ -322,6 +329,28 @@ asynStatus PIasynController::writeInt32(asynUser *pasynUser, epicsInt32 value)
+ 		m_pGCSController->m_targetMode = value;
+         setIntegerParam(0, PI_CS_TARGETMODE, value);
+     }
++    else if (function == PI_HEX_INIT)
++    {
++        // ioc-motion: the hexapod's reference run from a controller-level record: one INI for
++        // every axis (the LabVIEW device's hexinit set), through the same guarded path as the
++        // record's HOMF. Every axis then reports homing until #5 reads 0.
++        if (value != 0)
++        {
++            status = m_pGCSController->referenceVelCts(getPIAxis(0), 0.0, 1);
++            if (asynSuccess == status)
++            {
++                for (int axis = 0; axis < numAxes_; axis++)
++                {
++                    PIasynAxis* pA = getPIAxis(axis);
++                    pA->m_isHoming = 1;
++                    pA->setIntegerParam(motorStatusDone_, 0);
++                    pA->callParamCallbacks();
++                }
++                epicsEventSignal(pollEventId_);
++            }
++        }
++        setIntegerParam(0, PI_HEX_INIT, 0);   // a command, not a state
++    }
+     else {
+         /* Call base class call its method (if we have our parameters check this here) */
+         status = asynMotorController::writeInt32(pasynUser, value);
+@@ -579,6 +608,16 @@ asynStatus PIasynController::configAxis(PIasynAxis *pAxis)
+ asynStatus PIasynController::poll()
+ {
+     m_pGCSController->getGlobalState(pAxes_, numAxes_);
++
++    // ioc-motion: the hexapod's status word and its four-state summary (PIHexapodCtrl.db)
++    int statusWord, referenced, initialising, state;
++    if (m_pGCSController->getControllerState(statusWord, referenced, initialising, state) == asynSuccess)
++    {
++        setIntegerParam(0, PI_HEX_STATUS_WORD, statusWord);
++        setIntegerParam(0, PI_HEX_REFERENCED, referenced);
++        setIntegerParam(0, PI_HEX_INITIALISING, initialising);
++        setIntegerParam(0, PI_HEX_STATE, state);
++    }
+     
+     setDoubleParam(0, PI_SUP_RBPIVOT_X, m_pGCSController->GetPivotX());
+     setDoubleParam(0, PI_SUP_RBPIVOT_Y, m_pGCSController->GetPivotY());
+diff --git a/pigcs2App/src/PIasynController.h b/pigcs2App/src/PIasynController.h
+index bfae0bb..4b225c3 100644
+--- a/pigcs2App/src/PIasynController.h
++++ b/pigcs2App/src/PIasynController.h
+@@ -76,6 +76,13 @@ private:
+     int PI_CS_KST;
+     int PI_CS_KSW;
+ 
++    // ioc-motion: the hexapod's controller-level state (PIHexapodCtrl.db)
++    int PI_HEX_STATUS_WORD;
++    int PI_HEX_REFERENCED;
++    int PI_HEX_INITIALISING;
++    int PI_HEX_STATE;
++    int PI_HEX_INIT;
++
+ };
+ 
+ #define PI_SUP_POSITION_String		"PI_SUP_POSITION"
+@@ -96,6 +103,12 @@ private:
+ #define PI_CS_KST_String		    "PI_CS_KST"
+ #define PI_CS_KSW_String		    "PI_CS_KSW"
+ 
++#define PI_HEX_STATUS_WORD_String   "PI_HEX_STATUS_WORD"
++#define PI_HEX_REFERENCED_String    "PI_HEX_REFERENCED"
++#define PI_HEX_INITIALISING_String  "PI_HEX_INITIALISING"
++#define PI_HEX_STATE_String         "PI_HEX_STATE"
++#define PI_HEX_INIT_String          "PI_HEX_INIT"
++
+ typedef struct PIasynControllerNode {
+     ELLNODE node;
+     const char *portName;

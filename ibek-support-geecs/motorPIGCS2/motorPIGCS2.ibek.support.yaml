@@ -14,8 +14,12 @@ entity_models:
     description: |-
       PI's old "Hexapod" controller over a geecsSerial.Port (57600 8N1, no
       handshake, LF; the driver sets the asyn port's terminators itself).
-      Creation sends *IDN?, VEL?, #4, #3, SPI? RST, then per axis VEL?,
-      POS? and #4; the switches below decide the rest (README).
+      Creation sends *IDN?, VEL?, #4, SPI? RST (and #3 only with
+      pos_with_char3), then per axis VEL?, POS? and #4; the switches below
+      decide the rest (README). Every poll pass sends #5 and #4, then POS?
+      per axis. PIHexapodCtrl.db gives the controller its records: DEFER,
+      STATUS_WORD / REFERENCED / INITIALISING / STATE (the #4 word and its
+      summary) and INIT (the reference run), the pivot readbacks, LAST_ERR.
     parameters:
       name:
         type: id
@@ -51,9 +55,20 @@ entity_models:
       home_allowed:
         type: bool
         description: |-
-          Upstream: the record's HOMF/HOMR send INI X (the hexapod's reference
-          run, every axis). false refuses them with an error and sends nothing.
-          Applies to every PI hexapod controller in the IOC.
+          true: the controller's INIT record, and the record's HOMF/HOMR on
+          any axis, send INI (the hexapod's one reference run, every axis to
+          0; PI's doc text for the M-8X0: no axis identifier). false refuses
+          them with an error and sends nothing. Applies to every PI hexapod
+          controller in the IOC.
+        default: false
+      auto_init:
+        type: bool
+        description: |-
+          true: at creation, when #4 reports not referenced (bit 16 clear),
+          send INI once, as the LabVIEW device does at its start; needs
+          home_allowed. false (upstream has no such step): the IOC reports
+          Not referenced and refuses moves until INIT is written. Applies to
+          every PI hexapod controller in the IOC.
         default: false
       vmo_check:
         type: bool
@@ -101,7 +116,7 @@ entity_models:
     pre_init:
       - when: first
         value: |
-          # ioc-motion's PI hexapod patch (README): upstream behaviour is 1, 1, 0, 1, 1, 1, 1
+          # ioc-motion's PI hexapod patch (README): upstream behaviour is 1, 1, 0, 1, 1, 1, 1, 0
           var PIHexapodInitServo {{ 1 if init_servo else 0 }}
           var PIHexapodHomeAllowed {{ 1 if home_allowed else 0 }}
           var PIHexapodVmoCheck {{ 1 if vmo_check else 0 }}
@@ -109,13 +124,16 @@ entity_models:
           var PIHexapodPosWithChar3 {{ 1 if pos_with_char3 else 0 }}
           var PIHexapodJogAllowed {{ 1 if jog_allowed else 0 }}
           var PIHexapodSetPosAllowed {{ 1 if set_position_allowed else 0 }}
+          var PIHexapodAutoInit {{ 1 if auto_init else 0 }}
       - value: |
           # PI_GCS2_CreateController(portName, asynPort, numAxes, priority, stackSize, movingPollMs, idlePollMs)
           PI_GCS2_CreateController("{{name}}", "{{port.name}}", 6, 0, 0, {{moving_poll_ms}}, {{idle_poll_ms}})
 
     databases:
-      # DEFER (deferred moves: the six-axis set as one MOV), the pivot
-      # readbacks RBPIVOT_X/Y/Z (SPI? RST at init) and LAST_ERR.
+      # DEFER (deferred moves: the six-axis set as one MOV), STATUS_WORD /
+      # REFERENCED / INITIALISING / STATE (#4 every poll), INIT (INI, gated by
+      # home_allowed), the pivot readbacks RBPIVOT_X/Y/Z (SPI? RST at init)
+      # and LAST_ERR.
       - file: PIHexapodCtrl.db
         args:
           P: "{{P}}"
