@@ -10,10 +10,14 @@
  *                             position register, "+0001200" + CR, readable
  *                             while indexing), ? (limit inputs, one raw byte)
  *   VXM query, once:          getD0 (firmware, firmware 1.20 and up)
- *   VXM writes:               F (On-Line, echo off) before the first program;
- *                             C,<program>,R for every move and home; D
- *                             (decelerate to a stop) or K (kill a program);
- *                             Q (back to Local mode) at IOC exit
+ *   VXM writes:               F (On-Line, echo off) on the first poll: the VXM
+ *                             is On-Line while the IOC runs, since in Local
+ *                             mode it answers V and X only (?, getD0 and the
+ *                             get... reads are silent and D is the digitizer
+ *                             dump: U_Velmex's VXM, 2026-10-29); C,<program>,R
+ *                             for every move and home; D (decelerate to a
+ *                             stop) or K (kill a program); Q (back to Local
+ *                             mode) at a clean IOC exit
  *   VRO queries, every poll:  V (status letter), X/Y (encoder 1/2 displayed
  *                             value in its primary unit + CR)
  *   VRO writes:               none. The readout answers X in Display mode
@@ -201,11 +205,11 @@ asynStatus VelmexController::readStatus()
 /** ?: one raw byte, a bit per limit input (bit 0 = motor 1 negative, bit 1 =
   * motor 1 positive, ... bit 7 = motor 4 positive); 0 = activated, 1 = not
   * activated or not connected (manual: normally closed switches, 255 = none).
-  * The ready prompt ^ (0x5E) is skipped here too: a genuine 0x5E needs motor
-  * 1's negative and motors 3 and 4's positive limits activated at once,
-  * impossible on a one- or two-motor VXM (unconnected inputs read 1), while a
-  * prompt read as the byte would end a negative move on a false LLS with no
-  * retry (the record skips the retry on a limit in the move's direction). */
+  * The ready prompt ^ (0x5E) is skipped here too: a genuine 0x5E needs bits 4
+  * and 6 set in an upper nibble that reads 0 on a one- or two-motor VXM (0x0C
+  * at rest on U_Velmex's), while a prompt read as the byte would end a
+  * negative move on a false LLS with no retry (the record skips the retry on
+  * a limit in the move's direction). */
 asynStatus VelmexController::readLimits()
 {
   char reply[VELMEX_REPLY_LEN];
@@ -267,11 +271,19 @@ asynStatus VelmexController::readEncoder(int encoder, double *value)
 void VelmexController::identify()
 {
   char reply[VELMEX_REPLY_LEN];
-  identified_ = 1;
   if (exchange(pasynUserController_, "getD0,", reply, sizeof(reply), 1, 1, VELMEX_VXM_TIMEOUT) == asynSuccess) {
-    setStringParam(VelmexVxmVersion_, reply);
+    /* A version is digits and a dot ("1.37"); anything else (the Local-mode
+     * dump "X+0000000" if the VXM had not taken F yet) is asked again next poll. */
+    size_t n = strspn(reply, "0123456789.");
+    if (n > 0 && reply[n] == '\0' && strchr(reply, '.')) {
+      setStringParam(VelmexVxmVersion_, reply);
+      identified_ = 1;
+    } else {
+      setStringParam(VelmexVxmVersion_, reply);
+    }
   } else {
     setStringParam(VelmexVxmVersion_, "no reply to getD0");
+    identified_ = 1;              /* older firmware is silent: do not ask every poll */
   }
 }
 
@@ -280,14 +292,15 @@ void VelmexController::identify()
 asynStatus VelmexController::poll()
 {
   char s[2] = {'\0', '\0'};
-  if (!identified_) identify();
   asynStatus s1 = readStatus();
-  /* On-Line only while a program runs: Q as soon as the VXM is idle again, so
-   * the front panel is live between moves and an IOC that dies between moves
-   * (a `docker stop` never reaches epicsAtExit) leaves the VXM as it found it. */
-  if (s1 == asynSuccess && online_ && vxmStatus_ == 'R') {
-    if (writeVxm("Q") == asynSuccess) { online_ = 0; vxmStatus_ = 'J'; }
+  /* On-Line while the IOC runs: in Local mode the VXM answers V and X only
+   * (the limit byte, getD0 and the get... reads are silent, and D dumps
+   * positions instead of stopping), so the first poll sends F and nothing
+   * sends Q until a clean exit. The front-panel jog buttons are off meanwhile. */
+  if (s1 == asynSuccess && !online_) {
+    if (writeVxm("F") == asynSuccess) { online_ = 1; vxmStatus_ = busy() ? 'B' : 'R'; }
   }
+  if (!identified_ && online_) identify();
   asynStatus s2 = readLimits();
   vroPollStatus_ = pasynUserEncoder_ ? readVroStatus() : asynSuccess;
   pollStatus_ = (s1 || s2) ? asynError : asynSuccess;   /* the VXM alone: a silent readout must not hide the VXM */
@@ -304,7 +317,7 @@ asynStatus VelmexController::poll()
 
 VelmexAxis::VelmexAxis(VelmexController *pC, int axisNo)
   : asynMotorAxis(pC, axisNo),
-    pC_(pC), motor_(axisNo + 1), encoder_(0), eres_(1.0), accelSetting_(0), homeBackoff_(0),
+    pC_(pC), motor_(axisNo + 1), encoder_(0), eres_(1.0), accelSetting_(0), homeBackoff_(0), limitsActiveLow_(1),
     moving_(0), homing_(0), homed_(0), homeForwards_(0), multiIndex_(0), lastSteps_(0), encoderOk_(0)
 {
   setIntegerParam(pC_->motorStatusHasEncoder_, 0);
@@ -312,12 +325,14 @@ VelmexAxis::VelmexAxis(VelmexController *pC, int axisNo)
   callParamCallbacks();
 }
 
-void VelmexAxis::configure(int encoder, double encoderUnitsPerCount, int accelSetting, int homeBackoff)
+void VelmexAxis::configure(int encoder, double encoderUnitsPerCount, int accelSetting, int homeBackoff,
+                           int limitsActiveLow)
 {
   encoder_ = encoder;
   eres_ = encoderUnitsPerCount;
   accelSetting_ = accelSetting;
   homeBackoff_ = homeBackoff;
+  limitsActiveLow_ = limitsActiveLow ? 1 : 0;
   setIntegerParam(pC_->motorStatusHasEncoder_, encoder_ ? 1 : 0);
   callParamCallbacks();
 }
@@ -497,8 +512,15 @@ asynStatus VelmexAxis::poll(bool *moving)
   lastSteps_ = steps;
   setDoubleParam(pC_->motorPosition_, (double)steps);
 
-  lowLimit = (pC_->limitByte_ & (1u << (2 * (motor_ - 1)))) ? 0 : 1;
-  highLimit = (pC_->limitByte_ & (1u << (2 * (motor_ - 1) + 1))) ? 0 : 1;
+  {
+    /* The manual's table: a limit input reads 0 when activated (N/C switches).
+     * limitsActiveLow_ 0 inverts it for a stage wired the other way round
+     * (U_Velmex's reads 0x0C at rest: motor 1's two bits low, off the switches). */
+    int lowRaw = (pC_->limitByte_ & (1u << (2 * (motor_ - 1)))) != 0;
+    int highRaw = (pC_->limitByte_ & (1u << (2 * (motor_ - 1) + 1))) != 0;
+    lowLimit = limitsActiveLow_ ? !lowRaw : lowRaw;
+    highLimit = limitsActiveLow_ ? !highRaw : highRaw;
+  }
   setIntegerParam(pC_->motorStatusLowLimit_, lowLimit);
   setIntegerParam(pC_->motorStatusHighLimit_, highLimit);
   /* "At home" = on the limit this axis homes to. The record reads ATHM from the
@@ -550,9 +572,9 @@ extern "C" int VelmexCreateController(const char *portName, const char *vxmPortN
   return asynSuccess;
 }
 
-/** VelmexAxisConfig(portName, motor, encoder, encoderUnitsPerCount, accelSetting, homeBackoff) */
+/** VelmexAxisConfig(portName, motor, encoder, encoderUnitsPerCount, accelSetting, homeBackoff, limitsActiveLow) */
 extern "C" int VelmexAxisConfig(const char *portName, int motor, int encoder, const char *encoderUnitsPerCount,
-                                int accelSetting, int homeBackoff)
+                                int accelSetting, int homeBackoff, int limitsActiveLow)
 {
   VelmexController *pC = static_cast<VelmexController *>(findAsynPortDriver(portName));
   double eres = encoderUnitsPerCount ? strtod(encoderUnitsPerCount, NULL) : 0.0;
@@ -582,7 +604,7 @@ extern "C" int VelmexAxisConfig(const char *portName, int motor, int encoder, co
     return asynError;
   }
   pC->lock();                            /* the poller is already running */
-  pAxis->configure(encoder, eres, accelSetting, homeBackoff);
+  pAxis->configure(encoder, eres, accelSetting, homeBackoff, limitsActiveLow);
   pC->unlock();
   return asynSuccess;
 }
@@ -607,11 +629,12 @@ static const iocshArg axisArg2 = {"Readout encoder (1, 2; 0 = none)", iocshArgIn
 static const iocshArg axisArg3 = {"Readout units per encoder count (ERES)", iocshArgString};
 static const iocshArg axisArg4 = {"Acceleration setting A<m>M<x> (1-127; 0 = leave)", iocshArgInt};
 static const iocshArg axisArg5 = {"Home backoff (steps; 0 = none)", iocshArgInt};
-static const iocshArg * const axisArgs[] = {&axisArg0, &axisArg1, &axisArg2, &axisArg3, &axisArg4, &axisArg5};
-static const iocshFuncDef axisDef = {"VelmexAxisConfig", 6, axisArgs};
+static const iocshArg axisArg6 = {"Limits active low (1 = the manual's 0 = activated; 0 = inverted)", iocshArgInt};
+static const iocshArg * const axisArgs[] = {&axisArg0, &axisArg1, &axisArg2, &axisArg3, &axisArg4, &axisArg5, &axisArg6};
+static const iocshFuncDef axisDef = {"VelmexAxisConfig", 7, axisArgs};
 static void axisCallFunc(const iocshArgBuf *args)
 {
-  VelmexAxisConfig(args[0].sval, args[1].ival, args[2].ival, args[3].sval, args[4].ival, args[5].ival);
+  VelmexAxisConfig(args[0].sval, args[1].ival, args[2].ival, args[3].sval, args[4].ival, args[5].ival, args[6].ival);
 }
 
 static void VelmexRegister(void)

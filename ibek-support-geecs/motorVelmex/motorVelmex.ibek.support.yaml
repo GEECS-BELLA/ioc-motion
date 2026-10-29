@@ -14,8 +14,9 @@ entity_models:
       One VXM (1-4 motors) and the VRO readout beside it: the driver over two
       geecsSerial.Ports (9600 8N1 both, the devices' standard; no terminators).
       Creation sends nothing; the poller sends V, X/Y/Z/T and ? to the VXM,
-      V and X/Y to the readout, and getD0 once. The first move sends F (the
-      VXM On-Line, its jog buttons off); the IOC's exit sends Q (back to Local).
+      V and X/Y to the readout, and getD0 once. The first poll sends F and the
+      VXM stays On-Line while the IOC runs (its jog buttons off: in Local mode
+      it answers V and X only); a clean exit sends Q (back to Local).
     parameters:
       name:
         type: id
@@ -106,6 +107,14 @@ entity_models:
           the switch is approached from one side; 0 = none. The LabVIEW
           driver's home used 500
         default: 0
+      limits_active_low:
+        type: bool
+        description: |-
+          true: a limit input reads 0 when activated, the manual's table for
+          N/C switches; false: inverted, for a stage wired the other way
+          round (U_Velmex's VXM reads 0x0C at rest, motor 1's two bits low,
+          off the switches)
+        default: true
       M:
         type: str
         description: |-
@@ -216,8 +225,8 @@ entity_models:
 
     pre_init:
       - value: |
-          # VelmexAxisConfig(motorPort, motor, encoder, encoderUnitsPerCount, accelSetting, homeBackoff)
-          VelmexAxisConfig("{{controller.name}}", {{motor}}, {{encoder}}, "{{ERES}}", {{accel_setting}}, {{home_backoff}})
+          # VelmexAxisConfig(motorPort, motor, encoder, encoderUnitsPerCount, accelSetting, homeBackoff, limitsActiveLow)
+          VelmexAxisConfig("{{controller.name}}", {{motor}}, {{encoder}}, "{{ERES}}", {{accel_setting}}, {{home_backoff}}, {{ 1 if limits_active_low else 0 }})
 
     databases:
       - file: VelmexMotor.db

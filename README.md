@@ -555,29 +555,36 @@ The ibek entities (`ibek-support-geecs/motorVelmex/motorVelmex.ibek.support.yaml
   the home backoff.
 
 **What goes down the lines.** Creation sends nothing; the first poll sends
-`Q` if the VXM was left On-Line (an IOC killed mid-move), else only queries.
-Every poll: `V`
+`F` (the VXM On-Line, echo off) and the VXM stays On-Line while the IOC
+runs, because in Local mode it answers only `V` and `X`: the limit byte,
+`getD0,` and the `get...` reads are silent there, and a `D` dumps positions
+instead of stopping (U_Velmex's VXM, firmware 1.37, 2026-10-29). Its
+front-panel jog buttons are off meanwhile. Every poll: `V`
 (status letter: `R` ready / `B` busy On-Line, `J` / `b` in Local mode),
 `?` (the limit inputs as one raw byte: bit 2(m−1) the motor's negative
-limit, bit 2(m−1)+1 its positive, 0 = activated, 255 = none activated or
-connected) and `X`/`Y`/`Z`/`T` (motor 1-4's position register, `+0001200`
+limit, bit 2(m−1)+1 its positive, 0 = activated by the manual's table for
+N/C switches, `limits_active_low: false` inverts it for a stage wired the
+other way round, 255 = none activated or connected; on a two-motor VXM the
+upper nibble reads 0) and `X`/`Y`/`Z`/`T` (motor 1-4's position register, `+0001200`
 CR, readable while indexing) on the VXM; `V` (`D` display mode, `P` power-up
 menu, `S` setup, `F` front-panel setup) and `X`/`Y` (encoder 1/2's displayed
-value in its primary unit, CR) on the readout; `getD0,` once (firmware,
-1.20 and up; older firmware is silent and the record reads "no reply").
+value in its primary unit, CR) on the readout; `getD0,` once, On-Line
+(firmware, 1.20 and up; older firmware is silent and the record reads "no
+reply").
 The readout answers `X` in Display mode without any mode command, and the
 driver never sends it one (`E`/`F` would put it in Setup mode and blank its
 buttons); a readout not in Display mode, or silent, is a problem on the
 record while the VXM's position and done state are still read, and no move
-is accepted until it answers again (no reference to close the loop on). The
-VXM is On-Line only while a program runs: every program is preceded by `F`
-(On-Line with echo off; the front-panel jog buttons are disabled until `Q`)
-and the first idle poll after it sends `Q` (back to Local mode), so the
-panel is live between moves and an IOC that dies between moves leaves the
-VXM as it found it. A `docker stop` never reaches epicsAtExit (the IOC is
-a child of the launcher and is killed after the grace period), so the exit
-`Q` the driver also registers only runs on an iocsh `exit`; an IOC killed
-mid-move leaves the VXM On-Line until a `Q` or a power cycle.
+is accepted until it answers again (no reference to close the loop on).
+The readout's power-up start menu answers no position either (`V` says `P`);
+`F` then `Q` on its line takes it to Display mode, which the snapshot's
+`--identity` pass does and the driver does not. After a VXM power cycle the
+poll re-sends `F`; a program sends it only as the fallback for a failed `F`
+write. The exit
+`Q` the driver registers runs on an iocsh `exit` only: a `docker stop` never
+reaches epicsAtExit (the IOC is a child of the launcher and is killed after
+the grace period), so a stopped IOC leaves the VXM On-Line until a `Q`, a
+power cycle or the LabVIEW driver's own mode commands.
 A move is `C,S<m>M<steps/s>[,A<m>M<x>],IA<m>M<target>,R` — always the
 **absolute** index: the relative form's zero (`I1M0`) means "index to the
 positive limit" and `I1M-0` the negative one, so a zero-length relative move
@@ -593,10 +600,10 @@ program (Local mode, or On-Line idle): the record sends STOP on an idle axis
 too, and in Local mode `D` is the digitizer dump (Appendix H), not a stop.
 The VXM's `^` (its ready prompt, one character, no terminator, sent when a
 program ends) lands anywhere in the reply stream and every VXM reply read
-skips it, the raw limit byte included: a genuine 0x5E would need motor 1's
-negative and motors 3 and 4's positive limits activated at once, impossible
-on a one- or two-motor VXM (unconnected inputs read 1), while a `^` taken as
-the byte would end a negative move on a false LLS with no retry.
+skips it, the raw limit byte included: a genuine 0x5E would need bits 4 and
+6 set in an upper nibble that reads 0 on a one- or two-motor VXM (0x0C at
+rest on U_Velmex's), while a `^` taken as the byte would end a negative move
+on a false LLS with no retry.
 
 **Refused, nothing sent:** jog (`moveVelocity`: the VXM has no host-driven
 continuous move outside a stored program; `TWF`/`TWR` are moves and work),
@@ -625,10 +632,12 @@ every motor (one `?`), so a limit hit between polls shows on the next one;
 `Z`/`T` (motors 3 and 4) answer only when stationary, so a four-motor VXM is
 polled for those two only between moves (not implemented: one motor so far);
 simultaneous motion of two motors (`(i1,i2)`) is not used; the readout's
-`P` state (its power-up menu, until a button press) stops the position
-readback — the driver reports it, nothing in the IOC presses the button.
-Verified on the fake only until the first hardware run (geecs-epics
-`services/vxmtest1`).
+`P` state (its power-up start menu, until its `C` button or an `F` then `Q`
+on its line) stops the position readback — the driver reports it and sends
+no mode command; the snapshot script's `--identity` pass does. The hardware
+snapshot of 2026-10-29 (geecs-epics `services/vxmtest1`) settled the
+Local-mode command set and the readout's reply format; the limit polarity
+and MRES wait for the motion phase.
 
 ## Template Info
 This repository was generated by
