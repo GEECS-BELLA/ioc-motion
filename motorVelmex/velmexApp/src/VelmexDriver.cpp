@@ -21,7 +21,7 @@
  *                             Setup mode and blank its buttons.
  * A program's end is the single character "^", sent by the VXM when it is
  * done, with no terminator: it may land anywhere in the reply stream, so
- * every VXM reply read skips it, except the raw limit byte.
+ * every VXM reply read skips it, the raw limit byte included (readLimits).
  */
 
 #include <stdio.h>
@@ -450,7 +450,10 @@ asynStatus VelmexAxis::stop(double acceleration)
    * axis too ("just in case"), and the idle VXM is in Local mode, where D is
    * the digitizer dump (Appendix H: two position lines), not a stop. */
   if (pC_->online_ && (moving_ || pC_->busy())) {
-    status = pC_->writeVxm(multiIndex_ ? "K" : "D");
+    /* Our own program: D for a one-index move (the program then ends), K for
+     * the two-index home. A program this IOC did not start (an IOC restarted
+     * mid-program): K, since D would only end its current index. */
+    status = pC_->writeVxm((multiIndex_ || !moving_) ? "K" : "D");
   } else {
     asynPrint(pasynUser_, ASYN_TRACE_FLOW, "%s:%s: motor %d: no program running; nothing sent\n",
               driverName, functionName, motor_);

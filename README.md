@@ -587,9 +587,10 @@ first moves away from the switch, so it is always approached from one side;
 neither the VXM's register nor the readout is zeroed. A stop is `D`
 (decelerate the running index; the program then goes on to its next
 command, which is fine for a one-index move) or `K` for a home with a
-backoff (two indexes; `K` stops at once), and nothing when no program of
-ours is running: the record sends STOP on an idle axis too, and the idle VXM
-is in Local mode, where `D` is the digitizer dump (Appendix H), not a stop.
+backoff (two indexes; `K` stops at once), `K` for a program this IOC did
+not start (an IOC restarted mid-program), and nothing when the VXM runs no
+program (Local mode, or On-Line idle): the record sends STOP on an idle axis
+too, and in Local mode `D` is the digitizer dump (Appendix H), not a stop.
 The VXM's `^` (its ready prompt, one character, no terminator, sent when a
 program ends) lands anywhere in the reply stream and every VXM reply read
 skips it, the raw limit byte included: a genuine 0x5E would need motor 1's
