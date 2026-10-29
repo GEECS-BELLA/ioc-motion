@@ -2,27 +2,35 @@
 
 The motion-controller image of GEECS-BELLA's native EPICS IOCs: the motor
 record on epics-containers' `ioc-motorsim` developer image (motor R7-4,
-asyn, autosave, motorSim, ...) plus `epics-motor/motorNewport` R1-3 and
-`epics-motor/motorAerotech` R1-1-1 (the Ensemble driver).
+asyn, autosave, motorSim, ...) plus `epics-motor/motorNewport` R1-3 (ESP300
+family, SMC100) and `epics-motor/motorAerotech` R1-1-1 (the Ensemble driver),
+and `geecsSerial.Port`, the one serial-line entity every serial device
+takes (local tty, raw TCP, RFC 2217: geecs-epics decision 15).
 Details, the patch and the driver's gaps: `README.md`.
 
 - **Instances** live in GEECS-BELLA/geecs-epics, not here: `esptest1`
   (ESP302 `U_ESP302_01`, `hosts/htu-linux-camserv2`, profile `bench-esp`)
   and its fake twin `esptest1-sim` (`hosts/sim`, profile `motion`);
   `enstest1` (Aerotech Ensemble `U_CompAerotech`, the compressor gratings,
-  read-only, profile `bench-ens`).
+  read-only, profile `bench-ens`); `smctest1` (SMC100PP `U_ProbeCamStage`
+  on a Digi port over RFC 2217, profile `bench-smc`) and its fake twin
+  `smctest1-sim`.
 - **Why ours.** No epics-containers image carries motorNewport (TAU
   Systems' `ioc-motornewport` is tier 2, reference only: geecs-epics
   decision 10). The other motor families geecs-epics' device catalogue
   assigns to `ioc-motion` join with their first device (decision 11).
-- **Patch and switch.** `ibek-support-geecs/motorNewport/esp300-read-only-init.patch`:
+- **Patch and switch.** `ibek-support-geecs/motorNewport/motorNewport-geecs.patch`:
   iocsh variables `ESP300InitStop` and `ESP300SetLimits`, C default 1
   (upstream: a stop per axis to count them, DHLM/DLLM pushed into the
   controller); the `ESP300Setup` entity's `init_stop` / `set_limits` default
   to false, so a boot sends queries only (with no autosave of the position
   fields: README). The `variable()` lines in the dbd
   are what make `var` work: without them iocsh prints "No known var" and the
-  stock behaviour runs.
+  stock behaviour runs. The same patch: `SMC100SetterResend` and
+  `SMC100StatusUpstream`, C default 1 (upstream: `setPosition` and
+  `setClosedLoop` resend the driver's last command, which can be a move;
+  `TS` read at fixed positions), entity defaults false, plus
+  `SMC100Motor.db` (README "SMC100").
   `ibek-support-geecs/motorAerotech/aerotech-ensemble-read-only-init.patch`:
   iocsh variable `EnsembleInitWrites`, C default 1 (upstream: a `NONE` probe,
   `RAMP MODE` and `WAIT MODE NOWAIT` at config); the `EnsembleSetup`

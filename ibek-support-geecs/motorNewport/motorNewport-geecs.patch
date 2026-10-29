@@ -1,0 +1,272 @@
+diff --git a/newportApp/Db/Makefile b/newportApp/Db/Makefile
+index 382778b..1b31df6 100644
+--- a/newportApp/Db/Makefile
++++ b/newportApp/Db/Makefile
+@@ -12,6 +12,7 @@ include $(TOP)/configure/CONFIG
+ # databases, templates, substitutions like this
+ #DB += xxx.db
+ DB += HXP_coords.db
++DB += SMC100Motor.db
+ DB += HXP_extra.db
+ DB += profileMoveAxisXPS.template
+ DB += profileMoveControllerXPS.template
+diff --git a/newportApp/Db/SMC100Motor.db b/newportApp/Db/SMC100Motor.db
+new file mode 100644
+index 0000000..acb5e82
+--- /dev/null
++++ b/newportApp/Db/SMC100Motor.db
+@@ -0,0 +1,33 @@
++# ioc-motion: one SMC100 axis (one controller address on the RS-485 chain) as a
++# motor record on SMC100Driver (DTYP asynMotor), and nothing else: no auxiliary
++# records with links into the driver. RSTM defaults to Never, so the record never
++# asks the driver to redefine the position at init (devMotorAsyn's
++# init_controller does for RSTM Always, or NearZero/Conditional with a non-zero
++# DVAL after an autosave restore; the SMC100 has no such command). RTRY 0: the
++# controller positions itself, the record does not retry. DISP 1 refuses every
++# put to the record's fields (dbPutField: CA and dbpf) without stopping the
++# driver's status callbacks, so readbacks stay live.
++record(motor, "$(P)$(M)")
++{
++	field(DESC, "$(DESC)")
++	field(DTYP, "asynMotor")
++	field(OUT,  "@asyn($(PORT),$(ADDR))")
++	field(DIR,  "$(DIR)")
++	field(VELO, "$(VELO)")
++	field(VBAS, "$(VBAS)")
++	field(VMAX, "$(VMAX=0)")
++	field(ACCL, "$(ACCL)")
++	field(BDST, "$(BDST)")
++	field(BVEL, "$(BVEL)")
++	field(BACC, "$(BACC)")
++	field(MRES, "$(MRES)")
++	field(PREC, "$(PREC)")
++	field(EGU,  "$(EGU)")
++	field(DHLM, "$(DHLM)")
++	field(DLLM, "$(DLLM)")
++	field(RDBD, "$(RDBD=0)")
++	field(RTRY, "$(RTRY=0)")
++	field(RSTM, "$(RSTM=Never)")
++	field(TWV,  "$(TWV=1)")
++	field(DISP, "$(DISP=0)")
++}
+diff --git a/newportApp/src/SMC100Driver.cpp b/newportApp/src/SMC100Driver.cpp
+index 05e9ef0..332c5be 100644
+--- a/newportApp/src/SMC100Driver.cpp
++++ b/newportApp/src/SMC100Driver.cpp
+@@ -31,6 +31,23 @@ K. Goetze 2012-03-23  Initial version
+ 
+ #define NINT(f) (int)((f)>0 ? (f)+0.5 : (f)-0.5)
+ 
++/* ioc-motion: two switches, 1 = upstream behaviour. Set before iocInit.
++ * SMC100SetterResend: 1 (upstream) lets setPosition() and setClosedLoop() call
++ *   writeReadController() without writing a command of their own, so they resend
++ *   whatever is left in outString_ (the last PA/PR move, VA, AC, TP or TS); 0
++ *   sends nothing and returns asynError (the SMC100 cannot redefine its position).
++ * SMC100StatusUpstream: 1 (upstream) reads TP and TS at fixed character
++ *   positions (a one-digit address), MOVING (28) only as moving and the
++ *   end-of-run digit by equality; 0 parses each reply after its command name
++ *   (addresses 1-31), counts HOMING and JOGGING as moving, reads every error
++ *   bit, sets Homed, and flags a problem in NOT REFERENCED, CONFIGURATION and
++ *   DISABLE states and on any error bit other than the two end-of-run bits
++ *   (manual EDH0206En2041 08/15, TS). */
++volatile int SMC100SetterResend = 1;
++extern "C" {epicsExportAddress(int, SMC100SetterResend);}
++volatile int SMC100StatusUpstream = 1;
++extern "C" {epicsExportAddress(int, SMC100StatusUpstream);}
++
+ /** Creates a new SMC100Controller object.
+   * \param[in] portName          The name of the asyn port that will be created for this driver
+   * \param[in] SMC100PortName     The name of the drvAsynSerialPort that was created previously to connect to the SMC100 controller 
+@@ -272,6 +289,11 @@ asynStatus SMC100Axis::setPosition(double position)
+   asynStatus status;
+   //static const char *functionName = "SMC100Axis::setPosition";
+ 
++  if (!SMC100SetterResend) {
++    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
++      "SMC100Axis::setPosition: not supported by the SMC100, nothing sent (axis %d)\n", axisNo_ + 1);
++    return asynError;
++  }
+   // ? not sure yet
+   //sprintf(pC_->outString_, "#%02dP=%+d", axisNo_ + 1, NINT(position));
+   status = pC_->writeReadController();
+@@ -283,6 +305,11 @@ asynStatus SMC100Axis::setClosedLoop(bool closedLoop)
+   asynStatus status;
+   //static const char *functionName = "SMC100Axis::setClosedLoop";
+ 
++  if (!SMC100SetterResend) {
++    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
++      "SMC100Axis::setClosedLoop: not implemented, nothing sent (axis %d)\n", axisNo_ + 1);
++    return asynError;
++  }
+   // ? not sure yet
+   //sprintf(pC_->outString_, "#%02dW=%d", axisNo_ + 1, closedLoop ? 1:0);
+   status = pC_->writeReadController();
+@@ -301,6 +328,47 @@ asynStatus SMC100Axis::poll(bool *moving)
+   int limit;
+   double position;
+   asynStatus comStatus;
++  const char *reply;
++  unsigned int errorBits, state;
++
++  if (!SMC100StatusUpstream) {
++    // Read the current motor position: "<address>TP<position>"
++    sprintf(pC_->outString_, "%1dTP", axisNo_ + 1);
++    comStatus = pC_->writeReadController();
++    if (comStatus) goto skip;
++    reply = strstr(pC_->inString_, "TP");
++    if (!reply) { comStatus = asynError; goto skip; }
++    position = (atof(reply + 2) / stepSize_);
++    setDoubleParam(pC_->motorPosition_, position);
++
++    // Read the status: "<address>TS<4 hex error digits><2 hex state digits>"
++    sprintf(pC_->outString_, "%1dTS", axisNo_ + 1);
++    comStatus = pC_->writeReadController();
++    if (comStatus) goto skip;
++    reply = strstr(pC_->inString_, "TS");
++    if (!reply || sscanf(reply + 2, "%4x%2x", &errorBits, &state) != 2) {
++      comStatus = asynError; goto skip;
++    }
++    // HOMING (1E, 1F), MOVING (28) and JOGGING (46) are motion
++    *moving = (state == 0x1E || state == 0x1F || state == 0x28 || state == 0x46);
++    setIntegerParam(pC_->motorStatusDone_, *moving ? 0:1);
++    setIntegerParam(pC_->motorStatusMoving_, *moving ? 1:0);
++    // bit 0 negative end of run, bit 1 positive end of run
++    setIntegerParam(pC_->motorStatusLowLimit_, (errorBits & 0x1) ? 1:0);
++    setIntegerParam(pC_->motorStatusHighLimit_, (errorBits & 0x2) ? 1:0);
++    setIntegerParam(pC_->motorStatusAtHome_, (state == 0x32) ? 1:0);
++    // referenced: every state but NOT REFERENCED (0A-11), CONFIGURATION (14) and HOMING
++    setIntegerParam(pC_->motorStatusHomed_,
++      (state >= 0x0A && state <= 0x14) || state == 0x1E || state == 0x1F ? 0:1);
++    // problem: NOT REFERENCED, CONFIGURATION, DISABLE (3C-3E), or an error bit
++    // other than the end-of-run bits (current limits, short circuit, following
++    // error, homing time-out, wrong ESP stage, DC voltage, 80 W)
++    setIntegerParam(pC_->motorStatusProblem_,
++      (state >= 0x0A && state <= 0x14) || (state >= 0x3C && state <= 0x3E) ||
++      (errorBits & ~0x3u) ? 1:0);
++    callParamCallbacks();
++    return asynSuccess;
++  }
+ 
+   // Read the current motor position
+   sprintf(pC_->outString_, "%1dTP", axisNo_ + 1);
+diff --git a/newportApp/src/devESP300.cc b/newportApp/src/devESP300.cc
+index ec26a08..219e463 100644
+--- a/newportApp/src/devESP300.cc
++++ b/newportApp/src/devESP300.cc
+@@ -98,6 +98,13 @@ static msg_types ESP300_table[] = {
+ };
+ 
+ 
++/* ESP300SetLimits: 1 (upstream behaviour) pushes the motor record's DHLM/DLLM
++ * into the controller's software travel limits (SR/SL) at record init and on
++ * every limit change; 0 leaves the controller's limits untouched and the
++ * record enforces its own. Set before iocInit: var ESP300SetLimits 0 */
++volatile int ESP300SetLimits = 1;
++extern "C" {epicsExportAddress(int, ESP300SetLimits);}
++
+ static struct board_stat **ESP300_cards;
+ 
+ /* --------------------------- program data --------------------- */
+@@ -149,9 +156,9 @@ static RTN_STATUS ESP300_end_trans(struct motorRecord *mr)
+     /* Remove trailing ';'s from message. */
+     motor_call = &(trans->motor_call);
+     msgptr = motor_call->message;
+-    last = strlen(msgptr) - 1;
+-    if (msgptr[last] == ';')
+-    msgptr[last] = (char) NULL;
++    last = strlen(msgptr);
++    if (last > 0 && msgptr[last - 1] == ';')  /* an empty transaction has no last byte */
++        msgptr[last - 1] = (char) NULL;
+ 
+     return(motor_end_trans_com(mr, drvtabptr));
+ }
+@@ -280,10 +287,12 @@ static RTN_STATUS ESP300_build_trans(motor_cmnd command, double *parms, struct m
+ 	    sprintf(buff, "%.2dMF;", axis);
+ 	    break;
+ 	case SET_HIGH_LIMIT:
+-	    sprintf(buff, "%.2dSR%f;", axis, cntrl_units);
++	    if (ESP300SetLimits)
++		sprintf(buff, "%.2dSR%f;", axis, cntrl_units);
+ 	    break;
+ 	case SET_LOW_LIMIT:
+-	    sprintf(buff, "%.2dSL%f;", axis, cntrl_units);
++	    if (ESP300SetLimits)
++		sprintf(buff, "%.2dSL%f;", axis, cntrl_units);
+ 	    break;
+ 	default:
+ 	    rtnval = ERROR;
+diff --git a/newportApp/src/devNewport.dbd b/newportApp/src/devNewport.dbd
+index 428ade6..9e9c15d 100644
+--- a/newportApp/src/devNewport.dbd
++++ b/newportApp/src/devNewport.dbd
+@@ -23,6 +23,11 @@ registrar(SMC100Register)
+ #variable(devXPSC8Debug)
+ #variable(drvXPSC8Debug)
+ #variable(drvESP300debug)
++# ioc-motion's read-only-init patch: iocsh switches (var ESP300InitStop 0)
++variable(ESP300InitStop, int)
++variable(ESP300SetLimits, int)
++variable(SMC100SetterResend, int)
++variable(SMC100StatusUpstream, int)
+ #variable(drvMM3000debug)
+ #variable(drvMM4000debug)
+ #variable(drvPM500debug)
+diff --git a/newportApp/src/drvESP300.cc b/newportApp/src/drvESP300.cc
+index cfa6ce3..e71e3f0 100644
+--- a/newportApp/src/drvESP300.cc
++++ b/newportApp/src/drvESP300.cc
+@@ -79,6 +79,12 @@ USAGE...    Motor record driver level support for Newport ESP300/100.
+ 
+ volatile int drvESP300debug = 0;
+ extern "C" {epicsExportAddress(int, drvESP300debug);}
++/* ESP300InitStop: 1 (upstream behaviour) counts the controller's axes at
++ * init by sending each a Stop (ST) until the controller answers "axis number
++ * out of range"; 0 probes with a query (MO?) instead, so initialisation
++ * writes nothing to the controller. Set before iocInit: var ESP300InitStop 0 */
++volatile int ESP300InitStop = 1;
++extern "C" {epicsExportAddress(int, ESP300InitStop);}
+ static inline void Debug(int level, const char *format, ...) {
+   #ifdef DEBUG
+     if (level < drvESP300debug) {
+@@ -726,12 +732,39 @@ errexit:
+             //    total_axis = 4;
+             //}
+ 
++            if (!ESP300InitStop)
++            {
++                /* Drain the controller's error FIFO (10 deep; TB? pops one per
++                 * read) so an error left by an earlier client cannot end the
++                 * axis count below at axis 1. */
++                int drain;
++                for (drain = 0; drain < 10; drain++)
++                {
++                    send_mess(card_index, "TB?", 0);
++                    recv_mess(card_index, buff, 1);
++                    if (atoi(buff) == 0)
++                        break;
++                    errlogPrintf("drvESP300 card %d: drained stale error: %s\n", card_index, buff);
++                }
++            }
++
+             // Stop all motors, checking for "Axis number out of range" to determine
+             // the number of axes on the device.
+             for (motor_index = 0; motor_index < ESP300_MAX_AXIS; motor_index++)
+             {
+-                sprintf(buff, STOP_AXIS, motor_index + 1);  /* Stop motor */
+-                send_mess(card_index, buff, 0);
++                if (ESP300InitStop)
++                {
++                    sprintf(buff, STOP_AXIS, motor_index + 1);  /* Stop motor */
++                    send_mess(card_index, buff, 0);
++                }
++                else
++                {
++                    /* Query instead of stop: an axis out of range answers
++                     * nothing (read times out) and sets error 9, as ST does. */
++                    sprintf(buff, "%.2dMO?", motor_index + 1);
++                    send_mess(card_index, buff, 0);
++                    recv_mess(card_index, buff, 1);
++                }
+                 // Check for axis number out of range.
+                 send_mess(card_index, "TB?", 0);
+                 recv_mess(card_index, buff, 1);

@@ -26,11 +26,18 @@ WORKDIR ${SOURCE_FOLDER}/ibek-support
 COPY ibek-support/_ansible _ansible
 ENV PATH=$PATH:${SOURCE_FOLDER}/ibek-support/_ansible
 
-# motorNewport R1-3: upstream ibek-support's recipe with the ESP300
-# read-only-init patch and the ESP300 entities (README "ESP300 family").
+# motorNewport R1-3: upstream ibek-support's recipe with ioc-motion's patch
+# (ESP300 read-only init, SMC100 fixes) and our SMC100 and ESP300 entities
+# (README "SMC100", "ESP300 family").
 # Only this copy is in the image, so ansible finds the module once.
 COPY ibek-support-geecs/motorNewport/ ${SOURCE_FOLDER}/ibek-support-geecs/motorNewport/
 RUN ansible.sh motorNewport
+
+# geecsSerial: one serial line as an asyn port, local tty / raw TCP / RFC 2217
+# (README "Serial lines"). An entity file only, no source: linked into
+# ibek-defs the way ansible links a module's.
+COPY ibek-support-geecs/geecsSerial/ ${SOURCE_FOLDER}/ibek-support-geecs/geecsSerial/
+RUN mkdir -p /epics/ibek-defs && ln -s ${SOURCE_FOLDER}/ibek-support-geecs/geecsSerial/geecsSerial.ibek.support.yaml /epics/ibek-defs/
 
 # motorAerotech R1-1-1: our recipe (none upstream) with the Ensemble
 # read-only-init patch and the Ensemble entities (README "Aerotech Ensemble").

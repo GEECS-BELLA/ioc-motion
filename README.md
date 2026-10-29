@@ -8,7 +8,7 @@ pvlogging, **motorSim**) plus:
 
 | Module | Version | Source | Reuse (decision 10) |
 |---|---|---|---|
-| motorNewport | R1-3 | [epics-motor/motorNewport](https://github.com/epics-motor/motorNewport) (ships no LICENSE file; tier 1 rests on the epics-motor org, geecs-epics device catalogue) | tier 1, dependency, with one build-time patch (below) |
+| motorNewport | R1-3 | [epics-motor/motorNewport](https://github.com/epics-motor/motorNewport) (ships no LICENSE file; tier 1 rests on the epics-motor org, geecs-epics device catalogue) | tier 1, dependency, with one build-time patch (below: ESP300, SMC100) |
 | motorAerotech | R1-1-1 | [epics-motor/motorAerotech](https://github.com/epics-motor/motorAerotech) (ships no LICENSE file either; `drvEnsembleAsyn.cc` cites a synApps licence it does not ship); no upstream ibek-support recipe, so ours | tier 1, dependency, with one build-time patch (below) |
 
 Drivers for the other families geecs-epics' device catalogue assigns to
@@ -27,6 +27,32 @@ DOCKER_DEFAULT_PLATFORM=linux/amd64 TARGET=runtime TAG=ioc-motion:local ./build 
 
 The compose files in geecs-epics name `ioc-motion:local`; the pin is this
 repository's commit, noted there.
+
+## Serial lines (`geecsSerial.Port`)
+
+Every serial device takes its line as an object, a `geecsSerial.Port`, and
+never creates a port itself (geecs-epics decision 15), so the same device
+config runs on a host's tty, a USB-serial adapter or a terminal server:
+
+The carrier is read from `address`, in asyn's own syntax, so a sim twin
+swaps one string:
+
+| `address` | Carrier | Line settings | Rendered |
+|---|---|---|---|
+| `/dev/serial/by-id/...` | a local tty | this IOC | `drvAsynSerialPortConfigure` + `asynSetOption` |
+| `host:port COM` | a terminal server's telnet socket with RFC 2217 (a Digi's 2001 + n−1 for port n) | this IOC, on every connect (asyn's `asynInterposeCom` restores baud, bits, parity, stop, crtscts and ixon after a reconnect) | `drvAsynIPPortConfigure` + `asynSetOption` |
+| `host:port` | a raw socket (a Digi's 2101 + n−1) | the terminal server's own port configuration | `drvAsynIPPortConfigure` only |
+
+RFC 2217 (`COM`) is the default for a device on a Digi: the IOC carries the line
+settings, so a reset or a re-profiled Digi port cannot leave the device at the
+wrong baud (the first SMC100, 2026-10-28, was silent on the raw socket and
+answered on RFC 2217 at its manual's 57600). Upstream's `asyn.AsynIP` is not
+used for serial lines: it takes baud, parity, stop and crtscts and renders
+none of them, and neither it nor `asyn.AsynSerial` has `ixon`.
+
+The file has no source and no install recipe; the Dockerfile links it into
+`/epics/ibek-defs` as ansible does a module's. It moves to a shared repo when a
+second image needs it (decision 11).
 
 ## ESP300 family (ESP300 / ESP301 / ESP302)
 
@@ -71,8 +97,8 @@ without autosave of the record's position fields (`motor_positions.req`:
 DVAL and friends; settings autosave is fine). PID writes happen only for axes with an
 encoder (`GAIN_SUPPORT`) and non-zero `PCOF/ICOF/DCOF`.
 
-`esp300-read-only-init.patch` (applied by `motorNewport.install.yml` on
-upstream R1-3; two source files and `devNewport.dbd`, whose `variable()`
+`motorNewport-geecs.patch` (applied by `motorNewport.install.yml` on
+upstream R1-3; its ESP300 part: two source files and `devNewport.dbd`, whose `variable()`
 lines are what make the switches visible to iocsh's `var` — without them
 `var` prints "No known var" and the stock behaviour runs, as the fake showed)
 adds two iocsh variables, both defaulting to upstream behaviour:
@@ -119,6 +145,88 @@ optional); until then it lives here.
 geecs-epics `hosts/sim/compose.yaml` (profile `motion`) runs this image
 against the ESP300 fake on the real `esptest1` config, with the fake's log as
 the transcript of what the IOC sent.
+
+## SMC100 (SMC100CC / SMC100PP)
+
+`SMC100Driver` is a "model 3" asynMotor driver: `SMC100CreateController` per
+serial line, one driver axis per controller on the line. Axis n is chain
+address n+1 (every command is `<n+1><cmd>`), so a single SMC100 is
+`num_axes: 1` and an RS-485 chain of six with addresses 1-6 is one
+controller with `num_axes: 6` (the chain's addresses must run 1..N). The
+ibek entities (`ibek-support-geecs/motorNewport/motorNewport.ibek.support.yaml`):
+
+- `geecsSerial.Port` — the line: 57600 8N1, `ixon: true`, CR LF both ways
+  (manual EDH0206En2041 08/15, 2.8 and 3.1: preset in the controller, not
+  configurable).
+- `motorNewport.SMC100Controller` — the driver on that port: chain length,
+  poll periods, `mres` (the driver's step size and every axis's `MRES`, one
+  value so they cannot disagree) and the two switches below.
+- `motorNewport.SMC100Axis` — one chain address as a motor record on
+  `SMC100Motor.db` (added by the patch: RSTM Never, RTRY 0, DISP on by default).
+
+**Units and `mres`.** The controller takes and reports float positions in the
+stage's preset units (mm for a linear stage); the driver divides `TP` by its
+step size and multiplies moves, `VA` and `AC` by it. Any `mres` works as long
+as the driver and the record share it, which the entities guarantee; it only
+has to show the stage's resolution (an SMC100PP's `FRS`/`FRM`: the first
+unit's 0.01/100 = 1e-4 mm) and keep travel/`mres` inside an int32. The default
+1e-6 does both for any stage under ±2 km.
+
+**Polling.** The asynMotor poller polls every axis on the line each cycle: at
+`moving_poll_ms` while any axis moves, `idle_poll_ms` otherwise (0 = never
+when idle). Each axis costs a `TP` and a `TS`, about 10 ms each on address 1
+and 16 ms on the others (manual 6.4), so a chain of six takes about 0.2 s a
+cycle and the 500 ms default leaves room.
+
+**Stage configuration lives in the controller.** Velocity and acceleration
+limits, backlash (`BA`) and hysteresis (`BH`) compensation, software travel
+limits (`SL`/`SR`), home type, micro-stepping (`FRM`/`FRS`), and the
+SmartStage setting (`ZX`) are configuration parameters: settable only in
+CONFIGURATION state, saved by `PW0`, which leaves the controller NOT
+REFERENCED (a home is needed after). An ESP-compatible Newport stage loads them
+from the stage itself (`ZX3`: read at power-up). The driver neither reads nor
+writes them, and nothing in an `ioc.yaml` describes the actuator: the IOC
+needs only the line and `mres`. Read them with `<n>ZT` (all parameters, every
+state, a query) for the instance's snapshot; `VELO` and `ACCL` must stay
+within the configured `VA` and `AC`, which the controller enforces anyway.
+
+### What the stock driver sends, and the patch
+
+Creation sends nothing; the poller sends `TP` and `TS` per axis. A move sends
+`VA`, `AC` and `PA` (or `PR`); a home `OR`; a stop `ST`; a jog queries `SR?`
+or `SL?` and moves there. Two calls send something they did not write:
+
+- **`setPosition` and `setClosedLoop` resend the last command.** Both call
+  `writeReadController()` with the lines that format their command commented
+  out, so the buffer still holds the previous command. That is nearly always
+  the poller's last `TS`, harmless; but a call that lands between a move's
+  `PA`/`PR` and the next poll resends the move (a relative one moves again).
+  The motor record reaches `setPosition` when the dial position is redefined:
+  SET mode with the offset frozen (`FOFF` Frozen; with `FOFF` Variable SET
+  only moves `OFF` and sends nothing) and an autosave restore at init (RSTM).
+  `setClosedLoop` is not reachable from `SMC100Motor.db`: the record forwards
+  `CNEN` only to a driver that reports gain support (this one does not), and
+  the asynMotor auto-power option has no record here. Either way the call
+  reports success and does nothing it claims. On the fake (2026-10-29) a
+  frozen-offset SET reached `setPosition`, which with the patch sent nothing
+  and printed its error; a `CNEN` put sent nothing at all.
+- **`TS` is read by fixed character positions.** `inString_[6..8]` assume a
+  one-digit address (addresses 10-31 misparse), only state 28 (MOVING) is
+  motion (HOMING reads as done), end of run is matched by digit equality, and
+  nothing sets the problem bit: a stage NOT REFERENCED, in DISABLE or with a
+  following error refuses a move without a sign, and the record finishes the
+  move at once at the old position.
+
+`motorNewport-geecs.patch`'s SMC100 part adds two iocsh variables, both
+defaulting to upstream behaviour (`variable()` lines in `devNewport.dbd`):
+
+| Variable | 1 (upstream) | 0 |
+|---|---|---|
+| `SMC100SetterResend` | `setPosition` / `setClosedLoop` resend the buffer | send nothing, print an error, return asynError (the SMC100 has no position redefine) |
+| `SMC100StatusUpstream` | fixed-position `TP`/`TS` parsing as above | parse after `TP`/`TS` (addresses 1-31); moving = HOMING (1E, 1F), MOVING (28), JOGGING (46); limits from error bits 0 and 1; Homed in every state but NOT REFERENCED (0A-11), CONFIGURATION (14) and HOMING; problem in NOT REFERENCED, CONFIGURATION, DISABLE (3C-3E) or on any other error bit (manual, `TS`) |
+
+`SMC100Controller`'s `setter_resend` and `status_upstream` render them and
+default to false. They are global to the IOC (every SMC100 line in it).
 
 ## Aerotech Ensemble
 
