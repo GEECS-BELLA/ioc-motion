@@ -316,7 +316,7 @@ encoder's home bit, which this driver never sets (it reads 0). A position
 reply that is not an ACK (`PFBKPROG`, `PCMDPROG`) leaves the position as it
 was and sets CommError (the patch; upstream set the encoder position to 0 and
 read the command unchecked). Why: a disabled servo axis drifts and its command does not
-(U_CompAerotech's separation axis, 2026-10-29: 0.14 to 0.23 um from the
+(U_CompAerotech's separation axis, 2026-10-29: 0.18 to 0.24 um from the
 command right after a `DISABLE`, about 0.2 um more over 15 minutes), so the
 commanded readback hides where the stage is. With `RTRY` 0 a move is still
 absolute (`LINEAR` to the target; relative moves need RTRY non-zero and an
