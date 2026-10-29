@@ -1,8 +1,8 @@
 # yaml-language-server: $schema=../../ibek-support/_scripts/support_install_variables.json
 
 # epics-motor/motorAerotech R1-1-1 (no recipe in upstream ibek-support: ours),
-# with ioc-motion's read-only-init patch for the Ensemble driver and its motor
-# database (README "Aerotech Ensemble"). master after R1-1-1 changes CI files only.
+# with ioc-motion's patch for the Ensemble driver (read-only init, per-axis
+# power policy) and its motor database (README "Aerotech Ensemble"). master after R1-1-1 changes CI files only.
 module: motorAerotech
 version: R1-1-1
 organization: http://github.com/epics-motor/
@@ -17,10 +17,12 @@ libs:
   - motor
   - asyn
 
-# One iocsh variable, upstream behaviour by default:
-#   EnsembleInitWrites (drvEnsembleAsyn.cc)  1 (upstream) or 0 (a query probe;
-#   the mode commands before each motion command). README "Aerotech Ensemble".
+# Upstream behaviour by default (README "Aerotech Ensemble"):
+#   var EnsembleInitWrites (drvEnsembleAsyn.cc)  1 (upstream) or 0 (a query
+#   probe; the mode commands before each motion command).
+#   EnsembleAxisPower(card, axis, policy, onDelay, offDelay)  per axis; an axis
+#   with no call is "leave" (upstream: the driver never enables or disables).
 # The patch also adds aerotechApp/Db/EnsembleMotor.db (RSTM Never, RTRY 0, DISP).
 patch_file:
-  path: aerotech-ensemble-read-only-init.patch
+  path: aerotech-ensemble.patch
   when: true

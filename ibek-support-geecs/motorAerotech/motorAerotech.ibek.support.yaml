@@ -114,7 +114,8 @@ entity_models:
     description: |-
       One driver axis of an EnsembleController as a motor record ($(P)$(M)) on
       EnsembleMotor.db (RSTM Never: the record never redefines the controller's
-      position; RTRY 0; DISP 1 by default refuses puts to the record).
+      position; RTRY 0; DISP 1 by default refuses puts to the record),
+      and its power policy (default leave, upstream: no EnsembleAxisPower line).
     parameters:
       controller:
         type: object
@@ -207,6 +208,43 @@ entity_models:
           driver's status callbacks keep its readbacks live. Default true: an
           instance that writes says so with DISP false.
         default: true
+      power_policy:
+        type: enum
+        description: |-
+          Per-axis power policy (ioc-motion's patch, README "Power policy").
+          leave: upstream, the driver never enables or disables on its own.
+          on_for_move: before a move, jog or home, ENABLE if the axis reads
+          disabled (acknowledged and read back, else no motion command; never
+          FAULTACK), then power_on_delay; after the end of motion,
+          power_off_delay, then DISABLE, and DMOV stays 0 until the axis reads
+          disabled. keep_on: the same ENABLE before motion; a CNEN 0 put is
+          refused (nothing sent, PROBLEM set) and the driver never disables.
+          Boot and the idle poll send queries only under every policy.
+        default: leave
+        values:
+          leave: leave
+          on_for_move: on_for_move
+          keep_on: keep_on
+      power_on_delay:
+        type: float
+        description: |-
+          Seconds after an ENABLE the driver sent, before the motion command
+          (0..1: it blocks this axis's poll). on_for_move and keep_on only.
+        default: 0
+      power_off_delay:
+        type: float
+        description: |-
+          Seconds from the end of motion to DISABLE (on_for_move only), at
+          least the controller's moving poll period; it is also settling time
+          before DMOV. No useful default: an on_for_move axis sets it.
+        default: 0
+
+    pre_init:
+      - value: |
+          {% if power_policy != 'leave' %}
+          # EnsembleAxisPower(card, driver axis, policy, on delay s, off delay s): ioc-motion's power-policy patch
+          EnsembleAxisPower({{controller.card}}, {{addr}}, "{{power_policy}}", {{power_on_delay}}, {{power_off_delay}})
+          {% endif %}
 
     databases:
       - file: EnsembleMotor.db
