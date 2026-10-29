@@ -664,9 +664,11 @@ The ibek entities (`ibek-support-geecs/motorVelmex/motorVelmex.ibek.support.yaml
 
 **What goes down the lines.** Creation sends nothing; `VelmexAxisConfig`
 runs one poll before iocInit, so the record's initial VAL is the real
-position (on a line that takes a second to settle the poller's first poll
-was not done by iocInit, VAL started at 0 below DLLM and the record showed
-LVIO until the first move); that first poll sends
+position (the poller starts in the controller's constructor and its first
+poll ran before the axis had its encoder, so it read the VXM's register but
+not the readout; the record, initialising under UEIP from that status, took
+an encoder position of 0: VAL 0, below DLLM, LVIO until the first move);
+the first poll sends
 `F` (the VXM On-Line, echo off) and the VXM stays On-Line while the IOC
 runs, because in Local mode it answers only `V` and `X`: the limit byte,
 `getD0,` and the `get...` reads are silent there, and a `D` dumps positions

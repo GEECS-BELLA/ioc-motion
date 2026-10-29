@@ -675,11 +675,11 @@ extern "C" int VelmexAxisConfig(const char *portName, int motor, int encoder, co
   }
   pC->lock();                            /* the poller is already running */
   pAxis->configure(encoder, eres, accelSetting, homeBackoff, limitsActiveLow);
-  /* One poll now, before iocInit: the record takes its initial VAL from the
-   * position the driver holds when it initialises, and on a line that takes a
-   * second to settle (RFC 2217) the poller's first poll is not done by then,
-   * so VAL started at 0, below DLLM, and the record showed LVIO until the
-   * first move (U_Velmex, 2026-10-29). */
+  /* One poll now, with the encoder configured: the poller starts in the
+   * controller's constructor and its first poll ran before this axis had its
+   * encoder, so it read the VXM's register but not the readout; the record,
+   * initialising under UEIP from that status, took an encoder position of 0:
+   * VAL 0, below DLLM, LVIO until the first move (U_Velmex, 2026-10-29). */
   {
     bool moving;
     pC->poll();
