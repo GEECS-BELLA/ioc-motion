@@ -299,6 +299,38 @@ program-unit positions times `CountsPerUnit`. `MRES` = 1 / `CountsPerUnit`
 (read from the controller), with `EGU` its `UnitsName`; the entity has no
 default for `MRES` on purpose.
 
+**Readback.** The poller reports `PFBKPROG` (the feedback, the encoder) as
+the encoder position and `PCMDPROG` (the commanded position) as the motor
+position (drvEnsembleAsyn.cc L772-L795), both in counts with the same
+`CountsPerUnit`. `EnsembleMotor.db` takes `UEIP` (default No, the record's);
+the `EnsembleAxis` entity renders **`UEIP` Yes by default**, so `RBV` is the
+encoder: `ERES` 0 becomes `MRES` at init (motorRecord.cc L692-L695), the
+encoder ratio is 1 (the driver ignores the record's ratio push, "does not
+support setting encoder ratio", and needs none) and the scaling is exact. The
+record falls back to the commanded position, for good, on an axis whose
+status shows no feedback device when the record first reads it
+(`PositionFeedbackType` 0, or a status not yet delivered at record init: no
+`EA_PRESENT`, motorRecord.cc L3671-L3675); geecs-epics' enstest1 harness
+reads `UEIP` back and refuses to run without Yes. `ATHM` then follows the
+encoder's home bit, which this driver never sets (it reads 0). A position
+reply that is not an ACK (`PFBKPROG`, `PCMDPROG`) leaves the position as it
+was and sets CommError (the patch; upstream set the encoder position to 0 and
+read the command unchecked). Why: a disabled servo axis drifts and its command does not
+(U_CompAerotech's separation axis, 2026-10-29: 0.18 to 0.24 um from the
+command right after a `DISABLE`, about 0.2 um more over 15 minutes), so the
+commanded readback hides where the stage is. With `RTRY` 0 a move is still
+absolute (`LINEAR` to the target; relative moves need RTRY non-zero and an
+encoder, motorRecord.cc L2289), and nothing new goes on the wire.
+**`RDBD`** (entity parameter, **no default**: below |MRES| the record raises
+it to |MRES|) is the in-position band. With `RTRY` 0 the record neither retries nor sets
+`MISS` (motorRecord.cc `maybeRetry`, L1054-L1056: `MISS` is set only once
+`RTRY` retries ran out) and raises no alarm on a position outside it; a
+position outside the band shows in `RBV` and `DIFF`. It also sets the
+new-target monitor's deadband, `NTMF` x (|`BDST`| + `RDBD`), 2 x `RDBD` by
+default (next section): with the encoder as RBV an overshoot or settle beyond
+it during a move makes the record send a STOP (`ABORT`), under every policy,
+so `RDBD` must sit well above the settle jitter.
+
 ### What the stock driver and record send, and the patch
 
 At `EnsembleAsynConfig` (drvEnsembleAsyn.cc, R1-1-1 line numbers):
@@ -411,7 +443,24 @@ is still held, and the disable follows `offDelay` later. Details:
   `services/enstest1/phase_b.sh`: STOP, CNEN 0, verified) or the controller's.
 - **STOP/abort**: `ABORT @n` as upstream; its end of motion starts `offDelay`,
   then `DISABLE`. A STOP put during `onDelay` waits (the port thread sleeps)
-  and aborts the move just sent.
+  and aborts the move just sent. **A STOP once the motion has ended** (the
+  poller has seen its end, the axis held for its `DISABLE`, in the off window
+  or after the `DISABLE`) sends nothing when a fresh `AXISSTATUS` and
+  `PLANESTATUS(0)` read no motion and no home cycle (`powerStopNotNeeded`, a
+  console line); any motion, a reply that is not clean, or a held home
+  (HomeAsync.bcx's several moves) sends the `ABORT`. It trusts the status bits
+  as the poller's end of motion does: a motion the controller acknowledged but
+  does not yet show would also be taken for its end by the poller (the
+  `offDelay` floor guards that).
+  Why: the hold keeps DMOV 0, so the record still sees MOVN 1 and runs its
+  new-target monitor (motorRecord.cc `process()`, L1325-L1340, NTM Yes by
+  default): a readback past the target by more than `NTMF` x (|`BDST`| +
+  `RDBD`) against the commanded direction is a "wrong direction" to it (it
+  prints `<record>:tdir = <n>`) and it asks for a STOP. On U_CompAerotech
+  (2026-10-29, the commanded readback, `RDBD` = MRES) the command stepped 43
+  counts at each `DISABLE` and the record sent `ABORT @0` about 30 ms after
+  it on the three downward moves of five: a command to a drive just disabled.
+  A fault or a limit is the poller's to report and is unchanged.
 - **A refused move**: by the record's soft limits, nothing reaches the driver
   (no enable); by the controller (a `LINEAR` answered `#`, failed mode
   commands): the axis was enabled for it, so it is disabled `offDelay` later,
@@ -433,7 +482,9 @@ is still held, and the disable follows `offDelay` later. Details:
   plane 0 delays this axis's `offDelay` and its DMOV.
 - **New motion during a move or its off window**: the record still reads not
   done, so a new VAL (or a jog) is a retarget (the record stops, waits for done,
-  then moves): `ABORT`, `offDelay`, `DISABLE`, `ENABLE`, `onDelay`, the move. `on_for_move` wants `BDST` 0 and `RTRY` 0 (the
+  then moves): during the motion `ABORT`, `offDelay`, `DISABLE`, `ENABLE`,
+  `onDelay`, the move; once the motion has ended, the same without the `ABORT`
+  (the STOP bullet). `on_for_move` wants `BDST` 0 and `RTRY` 0 (the
   entity's defaults): a backlash or retry move power-cycles the axis.
 - **Home**: the off delay starts only once `AXISSTATUS` shows neither
   `move_active` nor `homing_active` (HomeAsync.bcx runs several moves); not yet
@@ -451,9 +502,14 @@ is still held, and the disable follows `offDelay` later. Details:
   them; `leave` takes upstream's path unchanged.
 
 Proved on geecs-epics' Ensemble fake (`services/enstest1/power_proofs.sh`, its
-record in `services/enstest1/README.md`); **the hardware check is owed**, the
-maintainer's to schedule (an `on_for_move` move of the separation axis with
-LabVIEW stopped). `dbior motorEnsemble 1` prints each axis's policy and state.
+record in `services/enstest1/README.md`). **On the controller** (2026-10-29,
+U_CompAerotech's separation axis, five `on_for_move` moves, LabVIEW stopped,
+geecs-epics `services/enstest1/phase-b-power-2026-10-29-hw2.txt`): the policy's
+order held on every move (`ENABLE`, the mode commands, `ABS`, `RAMP RATE`,
+`LINEAR`, `DISABLE`, done after the confirming poll), but the record sent the
+unplanned `ABORT` above. **The rerun on the encoder readback and the STOP
+change is owed**, the maintainer's to schedule. `dbior motorEnsemble 1` prints
+each axis's policy and state.
 
 ### Known gaps in the upstream driver (R1-1-1), from reading it
 

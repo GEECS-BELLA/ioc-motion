@@ -114,7 +114,8 @@ entity_models:
     description: |-
       One driver axis of an EnsembleController as a motor record ($(P)$(M)) on
       EnsembleMotor.db (RSTM Never: the record never redefines the controller's
-      position; RTRY 0; DISP 1 by default refuses puts to the record),
+      position; RTRY 0; RBV from the encoder, UEIP; DISP 1 by default refuses
+      puts to the record),
       and its power policy (default leave, upstream: no EnsembleAxisPower line).
     parameters:
       controller:
@@ -200,6 +201,23 @@ entity_models:
         description: |-
           Dial low limit (EGU); 0 and 0 = no soft limits
         default: 0
+      RDBD:
+        type: float
+        description: |-
+          In-position band (EGU). With RTRY 0 (no retries) it neither retries
+          nor sets MISS; the record widens its new-target monitor's deadband to
+          NTMF x (BDST + RDBD) with it, and raises a value below |MRES| to |MRES|.
+          No default on purpose: with RBV from the encoder (UEIP) the monitor
+          sends a STOP (ABORT) on any overshoot or settle beyond 2 x RDBD
+          during a move, so RDBD must be well above the axis's settle jitter
+          (the GEECS DB tolerance is the usual choice).
+      UEIP:
+        type: bool
+        description: |-
+          RBV from the encoder (the driver's PFBKPROG; ERES = MRES, exact) rather
+          than the commanded position (PCMDPROG). The record falls back to the
+          commanded position on an axis whose drive reports no feedback device.
+        default: true
       DISP:
         type: bool
         description: |-
@@ -271,4 +289,6 @@ entity_models:
           EGU:
           DHLM:
           DLLM:
+          RDBD:
+          UEIP: "{{ 'Yes' if UEIP else 'No' }}"
           DISP: "{{ 1 if DISP else 0 }}"

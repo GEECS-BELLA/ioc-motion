@@ -38,7 +38,8 @@ Details, the patch and the driver's gaps: `README.md`.
   iocsh `EnsembleAxisPower(card, axis, policy, onDelay, offDelay)`, rendered
   by the `EnsembleAxis` entity's `power_policy` (`leave` default: no call,
   upstream; `on_for_move`; `keep_on`), `power_on_delay`, `power_off_delay`
-  (README "Aerotech Ensemble", "Power policy"; hardware check owed).
+  (README "Aerotech Ensemble", "Power policy"; on the controller 2026-10-29, the rerun owed).
+  The `EnsembleAxis` entity renders `UEIP` Yes (RBV from the encoder) and `RDBD`.
 - **Build.** On the IOC host: `docker build --target runtime -t ioc-motion:local ~/ioc-motion`.
   On a workstation: `DOCKER_DEFAULT_PLATFORM=linux/amd64 TARGET=runtime
   TAG=ioc-motion:local ./build` (the variable is required on Apple silicon; the
