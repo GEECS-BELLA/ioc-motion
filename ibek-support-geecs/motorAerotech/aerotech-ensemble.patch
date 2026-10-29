@@ -66,7 +66,7 @@ index 3619889..dc7711a 100644
  # Aerotech A3200 asynMotor support
  driver(motorA3200)
 diff --git a/aerotechApp/src/drvEnsembleAsyn.cc b/aerotechApp/src/drvEnsembleAsyn.cc
-index 9e4d783..286efa1 100644
+index 9e4d783..ff23edb 100644
 --- a/aerotechApp/src/drvEnsembleAsyn.cc
 +++ b/aerotechApp/src/drvEnsembleAsyn.cc
 @@ -91,6 +91,8 @@ in file LICENSE that is included with this distribution.
@@ -533,7 +533,7 @@ index 9e4d783..286efa1 100644
                  epicsMutexUnlock(pAxis->mutexId);
                  continue;
              }
-@@ -726,13 +1086,16 @@ static void EnsemblePoller(EnsembleController *pController)
+@@ -726,13 +1086,17 @@ static void EnsemblePoller(EnsembleController *pController)
                  axisStatus.All = 0;
                  if (inputBuff[0] != ASCII_ACK_CHAR)
                  {
@@ -542,16 +542,17 @@ index 9e4d783..286efa1 100644
                      epicsMutexUnlock(pAxis->mutexId);
                      continue;
                  }
-+                pAxis->powerPollFails = 0;
                  else
                  {
                      int CW_sw_active, CCW_sw_active;
 -                    bool move_active;
 +                    bool move_active, hold;
++
++                    pAxis->powerPollFails = 0;
  
                      motorParam->setInteger(params, motorAxisCommError, 0);
                      axisStatus.All = atoi(&inputBuff[1]);
-@@ -740,8 +1103,10 @@ static void EnsemblePoller(EnsembleController *pController)
+@@ -740,8 +1104,10 @@ static void EnsemblePoller(EnsembleController *pController)
                      comStatus = sendAndReceive(pController, (char *) "PLANESTATUS(0)", inputBuff, sizeof(inputBuff));
                      move_active = (0x01 & atoi(&inputBuff[1])) ? true : false;
                      move_active |= axisStatus.Bits.move_active;
@@ -564,7 +565,7 @@ index 9e4d783..286efa1 100644
                          anyMoving = true;
  
                      motorParam->setInteger(pAxis->params, motorAxisPowerOn, axisStatus.Bits.axis_enabled);
-@@ -830,9 +1195,27 @@ static void EnsemblePoller(EnsembleController *pController)
+@@ -830,9 +1196,27 @@ static void EnsemblePoller(EnsembleController *pController)
                          motorParam->setInteger(pAxis->params, motorAxisProblem, 1);
                          PRINT(pAxis->logParam, TERROR, "EnsemblePoller: controller fault on axis=%d fault=0x%X\n", itera, axisFault);
                      }
@@ -592,7 +593,7 @@ index 9e4d783..286efa1 100644
              sprintf(outputBuff, "VFBK(@%d)", pAxis->axis);
              comStatus = sendAndReceive(pController, outputBuff, inputBuff, sizeof(inputBuff));
              if (comStatus != asynSuccess)
-@@ -941,7 +1324,7 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -941,7 +1325,7 @@ int EnsembleAsynConfig(int card,             /* Controller number */
      {
          /* we only care if we get a response
          so we don't need to send a valid command */
@@ -601,7 +602,7 @@ index 9e4d783..286efa1 100644
          status = sendAndReceive(pController, outputBuff, inputBuff, sizeof(inputBuff));
  
          retry++;
-@@ -1004,9 +1387,12 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -1004,9 +1388,12 @@ int EnsembleAsynConfig(int card,             /* Controller number */
              if (inputBuff[0] == ASCII_ACK_CHAR)
                  pAxis->swconfig.All = atoi(&inputBuff[1]);
  
@@ -617,7 +618,7 @@ index 9e4d783..286efa1 100644
  
              /* Get Reverse Direction indicator. */
              sprintf(outputBuff, getparamstr, axis, PARAMETERID_ReverseMotionDirection);
-@@ -1016,8 +1402,10 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -1016,8 +1403,10 @@ int EnsembleAsynConfig(int card,             /* Controller number */
          }
      }
  
@@ -630,7 +631,7 @@ index 9e4d783..286efa1 100644
  
      pController->pollEventId = epicsEventMustCreate(epicsEventEmpty);
  
-@@ -1029,6 +1417,95 @@ int EnsembleAsynConfig(int card,             /* Controller number */
+@@ -1029,6 +1418,95 @@ int EnsembleAsynConfig(int card,             /* Controller number */
      return (MOTOR_AXIS_OK);
  }
  
