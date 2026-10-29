@@ -1,7 +1,8 @@
 # yaml-language-server: $schema=../../ibek-support/_scripts/support_install_variables.json
 
 # Upstream ibek-support's motorNewport recipe (ibek-support 8545fa2), plus
-# the read-only-init patch for the ESP300 driver (README "ESP300 family").
+# ioc-motion's patch: the ESP300 read-only init (README "ESP300 family") and
+# the SMC100 setter and status fixes with SMC100Motor.db (README "SMC100").
 module: motorNewport
 version: R1-3
 organization: http://github.com/epics-motor/
@@ -16,9 +17,11 @@ libs:
   - motor
   - asyn
 
-# Two iocsh variables, upstream behaviour by default:
-#   ESP300InitStop  (drvESP300.cc)  axis discovery by Stop (1) or by query (0)
-#   ESP300SetLimits (devESP300.cc)  push DHLM/DLLM into the controller's SR/SL (1) or not (0)
+# Four iocsh variables, upstream behaviour (1) by default:
+#   ESP300InitStop       (drvESP300.cc)    axis discovery by Stop (1) or by query (0)
+#   ESP300SetLimits      (devESP300.cc)    push DHLM/DLLM into the controller's SR/SL (1) or not (0)
+#   SMC100SetterResend   (SMC100Driver.cpp) setPosition/setClosedLoop resend the last command (1) or refuse (0)
+#   SMC100StatusUpstream (SMC100Driver.cpp) fixed-position TS decoding (1) or every state and error bit (0)
 patch_file:
-  path: esp300-read-only-init.patch
+  path: motorNewport-geecs.patch
   when: true

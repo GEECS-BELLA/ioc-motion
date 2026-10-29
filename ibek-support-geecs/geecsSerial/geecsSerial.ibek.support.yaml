@@ -1,0 +1,118 @@
+# yaml-language-server: $schema=https://github.com/epics-containers/ibek/releases/download/3.0.1/ibek.support.schema.json
+
+# One serial line as an asyn port, whatever carries it: a local tty, a terminal
+# server's raw TCP socket, or a terminal server's RFC 2217 (telnet COM port
+# control) socket. Device entities take this as an object and never create
+# their own port, so moving a device between a host's serial port and a Digi
+# changes this entity only (geecs-epics decision 15). No source and no install:
+# the Dockerfile links this file into /epics/ibek-defs.
+#
+# Why not upstream's asyn.AsynIP / asyn.AsynSerial: AsynIP takes baud, parity,
+# stop and crtscts but renders none of them, and neither has ixon (asyn R4-46's
+# serial and RFC 2217 ports both accept it).
+
+module: geecsSerial
+
+entity_models:
+  - name: Port
+    description: |-
+      One serial line as an asyn octet port, the carrier read from the address
+      in asyn's own syntax: a path (/dev/serial/by-id/...) is a local tty;
+      "host:port COM" is a terminal server's telnet socket with RFC 2217 (a
+      Digi's 2001+), the line set by this IOC on every connect; a bare
+      "host:port" is a raw socket (a Digi's 2101+), the line set on the
+      terminal server itself, so the line parameters are not sent.
+    parameters:
+      name:
+        type: id
+        description: |-
+          The asyn port name, which device entities reference
+      address:
+        type: str
+        description: |-
+          /dev/... (local tty), host:port COM (RFC 2217) or host:port (raw TCP)
+      baud:
+        type: int
+        description: |-
+          Bits per second
+      bits:
+        type: int
+        description: |-
+          Data bits
+        default: 8
+      parity:
+        type: enum
+        description: |-
+          Parity
+        values:
+          none:
+          even:
+          odd:
+        default: none
+      stop:
+        type: int
+        description: |-
+          Stop bits, 1 or 2
+        default: 1
+      crtscts:
+        type: bool
+        description: |-
+          Hardware (RTS/CTS) flow control
+        default: false
+      ixon:
+        type: bool
+        description: |-
+          Software (XON/XOFF) flow control on output
+        default: false
+      input_eos:
+        type: str
+        description: |-
+          Input terminator, escaped as iocsh reads it ('\r\n'); empty = none
+        default: ''
+      output_eos:
+        type: str
+        description: |-
+          Output terminator, escaped ('\r\n'); empty = none
+        default: ''
+      trace:
+        type: bool
+        description: |-
+          asyn trace (errors, I/O, escaped) on this port from before the first
+          byte: every command and reply
+        default: false
+      trace_file:
+        type: str
+        description: |-
+          With trace: the file the trace goes to; empty = the console
+        default: ""
+
+    pre_init:
+      - value: |
+          {% set local = address.startswith('/') %}
+          {% set raw = not local and not address.upper().endswith(' COM') %}
+          {% if local %}
+          drvAsynSerialPortConfigure("{{name}}", "{{address}}", 0, 0, 0)
+          {% else %}
+          drvAsynIPPortConfigure("{{name}}", "{{address}}", 0, 0, 0)
+          {% endif %}
+          {% if trace %}
+          {% if trace_file %}
+          asynSetTraceFile("{{name}}", -1, "{{trace_file}}")
+          {% endif %}
+          asynSetTraceIOMask("{{name}}", -1, 0x2)
+          asynSetTraceMask("{{name}}", -1, 0x9)
+          {% endif %}
+          {% if not raw %}
+          asynSetOption("{{name}}", 0, "baud", "{{baud}}")
+          asynSetOption("{{name}}", 0, "bits", "{{bits}}")
+          asynSetOption("{{name}}", 0, "parity", "{{parity}}")
+          asynSetOption("{{name}}", 0, "stop", "{{stop}}")
+          asynSetOption("{{name}}", 0, "crtscts", "{{ 'Y' if crtscts else 'N' }}")
+          asynSetOption("{{name}}", 0, "ixon", "{{ 'Y' if ixon else 'N' }}")
+          {% endif %}
+          {% if input_eos %}
+          asynOctetSetInputEos("{{name}}", 0, "{{input_eos}}")
+          {% endif %}
+          {% if output_eos %}
+          asynOctetSetOutputEos("{{name}}", 0, "{{output_eos}}")
+          {% endif %}
