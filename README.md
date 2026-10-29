@@ -729,12 +729,14 @@ idle poll reads it. A single failed poll (a timeout on either line) is a
 comm error that keeps the last state and refuses moves until a poll
 succeeds; the record sees a problem, and ends a move on it, only after
 three failed polls in a row. The record's new-target monitor (`NTM`, an
-entity parameter, on by default as in the record) stops a move whose
-readback ends up on the wrong side of the target and re-issues it: on
-U_Velmex it was the recovery after the record's bad retries (the repeat of
-phase B, 2026-10-29: "tdir" twice, then the move that brought the stage
-back), and on the fake's once-a-second display model it stops a move
-mid-way (`D`) and re-issues it, a slower move at worst. The VXM's `^` (its ready prompt, one character, no terminator, sent when a
+entity parameter) is left at the record's default, on: it stops a move
+only when the readback is past the target by more than NTMF × (BDST +
+RDBD), which with this readout's lag means a real overshoot (in the settle
+the VXM is idle and nothing is sent; during an index a `D` limits it), and
+the record's retry logic then goes to the target within RTRY, so a stop
+costs one retry. In the repeat of phase B (2026-10-29) its two stops were
+refused by device support (the record was in COMM_ALARM) and the moves
+that brought the stage back were the record's third retries. The VXM's `^` (its ready prompt, one character, no terminator, sent when a
 program ends) lands anywhere in the reply stream and every VXM reply read
 skips it, the raw limit byte included: a genuine 0x5E would need bits 4 and
 6 set in an upper nibble that reads 0 on a one- or two-motor VXM (0x0C at

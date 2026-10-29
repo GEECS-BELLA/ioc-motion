@@ -215,13 +215,15 @@ entity_models:
       NTM:
         type: bool
         description: |-
-          The record's new-target monitor: it stops a move whose readback
-          ends up on the wrong side of the target and re-issues it. On
-          U_Velmex it was the recovery after the record's bad retries (the
-          repeat of phase B, 2026-10-29: "tdir" twice, then the move that
-          brought the stage back); on the fake's once-a-second display model
-          it stops a move mid-way and re-issues it, a slower move at worst.
-          The record's default, on
+          The record's new-target monitor, left at the record's default (on):
+          it stops a move only when the readback is past the target by more
+          than NTMF x (BDST + RDBD), which with this readout's lag means a real
+          overshoot (in the settle the VXM is idle and nothing is sent; during
+          an index a D limits it), and the record's retry logic then goes to
+          the target within RTRY: a stop costs one retry. In the repeat of
+          phase B (2026-10-29) its two stops were refused by device support
+          (the record was in COMM_ALARM) and the moves that brought the stage
+          back were the record's third retries
         default: true
       TWV:
         type: float
