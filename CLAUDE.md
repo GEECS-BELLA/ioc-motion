@@ -4,6 +4,7 @@ The motion-controller image of GEECS-BELLA's native EPICS IOCs: the motor
 record on epics-containers' `ioc-motorsim` developer image (motor R7-4,
 asyn, autosave, motorSim, ...) plus `epics-motor/motorNewport` R1-3 (ESP300
 family, SMC100) and `epics-motor/motorAerotech` R1-1-1 (the Ensemble driver),
+our `motorVelmex` (the Velmex VXM + VRO driver, README "Velmex VXM + VRO"),
 and `geecsSerial.Port`, the one serial-line entity every serial device
 takes (local tty, raw TCP, RFC 2217: geecs-epics decision 15).
 Details, the patch and the driver's gaps: `README.md`.
@@ -14,7 +15,10 @@ Details, the patch and the driver's gaps: `README.md`.
   `enstest1` (Aerotech Ensemble `U_CompAerotech`, the compressor gratings,
   read-only, profile `bench-ens`); `smctest1` (SMC100PP `U_ProbeCamStage`
   on a Digi port over RFC 2217, profile `bench-smc`) and its fake twin
-  `smctest1-sim`.
+  `smctest1-sim`;
+  `vxmtest1` (Velmex VXM + VRO `U_Velmex`, the 4 m undulator stage, two
+  Digi ports over RFC 2217, profile `bench-vxm`) and its fake twin
+  `vxmtest1-sim`.
 - **Why ours.** No epics-containers image carries motorNewport (TAU
   Systems' `ioc-motornewport` is tier 2, reference only: geecs-epics
   decision 10). The other motor families geecs-epics' device catalogue

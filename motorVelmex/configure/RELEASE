@@ -1,0 +1,2 @@
+# Paths to other modules come from the container's global RELEASE, which the
+# ibek-support build links in as RELEASE.local (it needs EPICS_BASE and ASYN).

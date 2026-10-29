@@ -44,6 +44,14 @@ RUN mkdir -p /epics/ibek-defs && ln -s ${SOURCE_FOLDER}/ibek-support-geecs/geecs
 COPY ibek-support-geecs/motorAerotech/ ${SOURCE_FOLDER}/ibek-support-geecs/motorAerotech/
 RUN ansible.sh motorAerotech
 
+# motorVelmex: our driver for the Velmex VXM stepping-motor controller with the
+# VRO encoder readout on a second line (README "Velmex VXM + VRO"). No upstream
+# module exists; the source is in this repository (motorVelmex/), copied into
+# place before ansible.sh so the recipe builds it instead of cloning.
+COPY ibek-support-geecs/motorVelmex/ ${SOURCE_FOLDER}/ibek-support-geecs/motorVelmex/
+COPY motorVelmex/ /epics/support/motorVelmex/
+RUN ansible.sh motorVelmex
+
 # get the ioc source and build it
 COPY ioc ${SOURCE_FOLDER}/ioc
 RUN ansible.sh ioc

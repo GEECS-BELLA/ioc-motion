@@ -526,6 +526,110 @@ each axis's policy and state.
   idle poll (a period below it) is what keeps the socket open
   (`docs/README_Ensemble.md`).
 
+## Velmex VXM + VRO
+
+`VelmexDriver` (`motorVelmex/`, ours: no EPICS support for the Velmex VXM
+exists anywhere public, 2026-10-29 search) is a "model 3" asynMotor driver
+for the Velmex VXM stepping-motor controller (one to four motors on one
+serial line) with a Velmex VRO encoder readout on a second line. The VXM is
+open-loop and counts steps; the readout is the position reference. The
+driver reports both — motor position = the VXM's absolute position register
+(steps), encoder position = the readout's displayed value over `ERES` — and
+the motor record closes the loop the way the LabVIEW driver did (`UEIP`,
+`RTRY`, `RDBD`: index, compare with the readout, index the difference).
+Sources: the VXM user's manual and command summary (VXM-CS 12-29-04), the VRO
+reference manual 1.30; both are in GEECS-Device-Drivers' VelmexStage tree.
+The ibek entities (`ibek-support-geecs/motorVelmex/motorVelmex.ibek.support.yaml`):
+
+- two `geecsSerial.Port`s — the VXM's and the readout's lines, 9600 8N1
+  (both manuals' standard setting), **no terminators**: the devices answer
+  a CR-ended value, a single letter or a single raw byte, and the driver
+  reads each reply the way its command is documented.
+- `motorVelmex.VelmexController` — the driver on those two ports: motors,
+  poll periods; `VelmexController.db` adds the controller-wide readings
+  (`$(P)vxm_status`, `$(P)vro_status`, `$(P)limit_byte`, `$(P)vxm_version`).
+- `motorVelmex.VelmexAxis` — one motor as a motor record on
+  `VelmexMotor.db` (RSTM Never, DISP on by default): its readout encoder
+  (`encoder` 1 or 2, `ERES`), `MRES` (mm per step; no default), the VXM's
+  acceleration setting (`accel_setting`, 0 = leave the controller's) and
+  the home backoff.
+
+**What goes down the lines.** Creation sends nothing; the first poll sends
+`Q` if the VXM was left On-Line (an IOC killed mid-move), else only queries.
+Every poll: `V`
+(status letter: `R` ready / `B` busy On-Line, `J` / `b` in Local mode),
+`?` (the limit inputs as one raw byte: bit 2(m−1) the motor's negative
+limit, bit 2(m−1)+1 its positive, 0 = activated, 255 = none activated or
+connected) and `X`/`Y`/`Z`/`T` (motor 1-4's position register, `+0001200`
+CR, readable while indexing) on the VXM; `V` (`D` display mode, `P` power-up
+menu, `S` setup, `F` front-panel setup) and `X`/`Y` (encoder 1/2's displayed
+value in its primary unit, CR) on the readout; `getD0,` once (firmware,
+1.20 and up; older firmware is silent and the record reads "no reply").
+The readout answers `X` in Display mode without any mode command, and the
+driver never sends it one (`E`/`F` would put it in Setup mode and blank its
+buttons); a readout not in Display mode, or silent, is a problem on the
+record while the VXM's position and done state are still read, and no move
+is accepted until it answers again (no reference to close the loop on). The
+VXM is On-Line only while a program runs: every program is preceded by `F`
+(On-Line with echo off; the front-panel jog buttons are disabled until `Q`)
+and the first idle poll after it sends `Q` (back to Local mode), so the
+panel is live between moves and an IOC that dies between moves leaves the
+VXM as it found it. A `docker stop` never reaches epicsAtExit (the IOC is
+a child of the launcher and is killed after the grace period), so the exit
+`Q` the driver also registers only runs on an iocsh `exit`; an IOC killed
+mid-move leaves the VXM On-Line until a `Q` or a power cycle.
+A move is `C,S<m>M<steps/s>[,A<m>M<x>],IA<m>M<target>,R` — always the
+**absolute** index: the relative form's zero (`I1M0`) means "index to the
+positive limit" and `I1M-0` the negative one, so a zero-length relative move
+must never reach the wire. A home is `C,S<m>M<steps/s>,[I<m>M<±backoff>,]I<m>M-0,R`
+(reverse, the LabVIEW driver's; `I<m>M0` forward): with a backoff the motor
+first moves away from the switch, so it is always approached from one side;
+neither the VXM's register nor the readout is zeroed. A stop is `D`
+(decelerate the running index; the program then goes on to its next
+command, which is fine for a one-index move) or `K` for a home with a
+backoff (two indexes; `K` stops at once), `K` for a program this IOC did
+not start (an IOC restarted mid-program), and nothing when the VXM runs no
+program (Local mode, or On-Line idle): the record sends STOP on an idle axis
+too, and in Local mode `D` is the digitizer dump (Appendix H), not a stop.
+The VXM's `^` (its ready prompt, one character, no terminator, sent when a
+program ends) lands anywhere in the reply stream and every VXM reply read
+skips it, the raw limit byte included: a genuine 0x5E would need motor 1's
+negative and motors 3 and 4's positive limits activated at once, impossible
+on a one- or two-motor VXM (unconnected inputs read 1), while a `^` taken as
+the byte would end a negative move on a false LLS with no retry.
+
+**Refused, nothing sent:** jog (`moveVelocity`: the VXM has no host-driven
+continuous move outside a stored program; `TWF`/`TWR` are moves and work),
+`setPosition` (the VXM can only null its registers, `N` / `IA<m>M-0`, never
+take a value; and the readout is the reference anyway), `setEncoderPosition`
+(the readout's zero is set on the readout — its `C` button, or `N`/`C`/`<`/`>`
+on its line — and moves every client's reference: a commissioning action,
+not the record's). A second motor's move while a program runs is refused
+too: the VXM runs one program at a time.
+
+**Units.** The VXM takes steps; `MRES` is the stage's advance per step (the
+lead screw's, or measured: index a known count, read the readout). The
+readout answers its displayed unit (mm), scaled and quantised by its own
+setup (encoder type, linear resolution, display resolution: its
+configuration, read with its `get` commands in Setup mode, never written by
+the IOC — geecs-epics decision 15's exception); the driver divides by
+`ERES`, so `ERES` is a choice of counting unit (0.001 shows a micrometre and
+keeps 2 km inside an int32), and its sign flips the readout's direction
+against the motor's. Speed: `S<m>M` takes 1 to 6000 steps/s; the record's
+`VMAX` holds the stage's ceiling (the GEECS DB capped the LabVIEW driver at
+2000). The VXM's own ramp is its stored acceleration setting (1-127, `A<m>M`),
+not the record's `ACCL`.
+
+**Known gaps, from the manuals:** the limit byte is read once per poll for
+every motor (one `?`), so a limit hit between polls shows on the next one;
+`Z`/`T` (motors 3 and 4) answer only when stationary, so a four-motor VXM is
+polled for those two only between moves (not implemented: one motor so far);
+simultaneous motion of two motors (`(i1,i2)`) is not used; the readout's
+`P` state (its power-up menu, until a button press) stops the position
+readback — the driver reports it, nothing in the IOC presses the button.
+Verified on the fake only until the first hardware run (geecs-epics
+`services/vxmtest1`).
+
 ## Template Info
 This repository was generated by
 [ioc-template](https://github.com/epics-containers/ioc-template) 4.8.0
