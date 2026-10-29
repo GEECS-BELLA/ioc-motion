@@ -75,7 +75,7 @@ VelmexController::VelmexController(const char *portName, const char *vxmPortName
                         ASYN_CANBLOCK | ASYN_MULTIDEVICE,
                         1, 0, 0),
     pasynUserEncoder_(NULL), online_(0), identified_(0),
-    vxmStatus_('?'), vroStatus_('?'), limitByte_(0xFF), pollStatus_(asynSuccess), pollFailures_(0), vroPollStatus_(asynSuccess)
+    vxmStatus_('?'), vroStatus_('?'), limitByte_(0xFF), limitsRead_(0), pollStatus_(asynSuccess), pollFailures_(0), vroPollStatus_(asynSuccess)
 {
   static const char *functionName = "VelmexController";
   asynStatus status;
@@ -215,7 +215,7 @@ asynStatus VelmexController::readLimits()
 {
   char reply[VELMEX_REPLY_LEN];
   asynStatus status = exchange(pasynUserController_, "?", reply, sizeof(reply), 0, 1, VELMEX_VXM_TIMEOUT);
-  if (status == asynSuccess) limitByte_ = (unsigned char)reply[0];
+  if (status == asynSuccess) { limitByte_ = (unsigned char)reply[0]; limitsRead_ = 1; }
   return status;
 }
 
@@ -541,7 +541,7 @@ asynStatus VelmexAxis::poll(bool *moving)
       fail = 1;
     }
   }
-  if (!fail) {
+  if (!fail && pC_->limitsRead_) {     /* the default byte, before any ? was answered, would read as limits under the inverted polarity */
     /* The manual's table: a limit input reads 0 when activated (N/C switches).
      * limitsActiveLow_ 0 inverts it for a stage wired the other way round
      * (U_Velmex's reads 0x0C at rest: motor 1's two bits low, off the switches). */

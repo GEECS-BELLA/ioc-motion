@@ -105,6 +105,7 @@ private:
   char vxmStatus_;               /**< The last V reply: R, B, J, b; '?' none yet */
   char vroStatus_;               /**< The readout's last V reply: D, P, S, F; '?' none yet */
   unsigned char limitByte_;      /**< The last ? reply */
+  int limitsRead_;               /**< A ? has been answered since boot: limitByte_ is the VXM's, not the default */
   asynStatus pollStatus_;        /**< The VXM part of the current poll (V, ?): error after VELMEX_POLL_FAILURES in a row */
   int pollFailures_;             /**< Consecutive polls whose V or ? failed; 0 = the last one answered */
   asynStatus vroPollStatus_;     /**< The readout's V this poll; the axis poll reads it last */
