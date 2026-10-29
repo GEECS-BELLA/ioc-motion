@@ -110,10 +110,11 @@ entity_models:
       limits_active_low:
         type: bool
         description: |-
-          true: a limit input reads 0 when activated, the manual's table for
-          N/C switches; false: inverted, for a stage wired the other way
-          round (U_Velmex's VXM reads 0x0C at rest, motor 1's two bits low,
-          off the switches)
+          true: a limit input reads 0 when the switch is activated, as the
+          manual's table labels it, which fits normally-open wiring; false:
+          a pressed switch reads 1, Velmex's own normally-closed wiring (the
+          switch opens the circuit; U_Velmex reads 0x0C at rest, 0x0D on the
+          negative limit)
         default: true
       M:
         type: str

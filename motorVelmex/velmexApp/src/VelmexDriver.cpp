@@ -675,6 +675,16 @@ extern "C" int VelmexAxisConfig(const char *portName, int motor, int encoder, co
   }
   pC->lock();                            /* the poller is already running */
   pAxis->configure(encoder, eres, accelSetting, homeBackoff, limitsActiveLow);
+  /* One poll now, before iocInit: the record takes its initial VAL from the
+   * position the driver holds when it initialises, and on a line that takes a
+   * second to settle (RFC 2217) the poller's first poll is not done by then,
+   * so VAL started at 0, below DLLM, and the record showed LVIO until the
+   * first move (U_Velmex, 2026-10-29). */
+  {
+    bool moving;
+    pC->poll();
+    pAxis->poll(&moving);
+  }
   pC->unlock();
   return asynSuccess;
 }
