@@ -47,7 +47,7 @@ public:
   asynStatus setPosition(double position);
   asynStatus setEncoderPosition(double position);
   /** Per-axis configuration from iocsh (VelmexAxisConfig) */
-  void configure(int encoder, double encoderUnitsPerCount, int accelSetting, int homeBackoff);
+  void configure(int encoder, double encoderUnitsPerCount, int accelSetting, int homeBackoff, int limitsActiveLow);
 
 private:
   VelmexController *pC_;   /**< The controller this axis belongs to */
@@ -56,6 +56,7 @@ private:
   double eres_;            /**< Readout units per encoder count as the record sees it (its ERES) */
   int accelSetting_;       /**< A<m>M<x> sent before every index, 1..127; 0 = leave the controller's */
   int homeBackoff_;        /**< Steps moved away from the limit before a home seeks it; 0 = none */
+  int limitsActiveLow_;    /**< 1: a limit input reads 0 when activated (the manual); 0: inverted */
   int moving_;             /**< This axis's program is running */
   int encoderOk_;          /**< The readout answered on the last poll: a reference exists */
   int homing_;             /**< The running program is a home */

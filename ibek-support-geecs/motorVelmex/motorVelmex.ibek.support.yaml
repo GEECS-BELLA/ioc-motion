@@ -106,6 +106,14 @@ entity_models:
           the switch is approached from one side; 0 = none. The LabVIEW
           driver's home used 500
         default: 0
+      limits_active_low:
+        type: bool
+        description: |-
+          true: a limit input reads 0 when activated, the manual's table for
+          N/C switches; false: inverted, for a stage wired the other way
+          round (U_Velmex's VXM reads 0x0C at rest, motor 1's two bits low,
+          off the switches)
+        default: true
       M:
         type: str
         description: |-
@@ -216,8 +224,8 @@ entity_models:
 
     pre_init:
       - value: |
-          # VelmexAxisConfig(motorPort, motor, encoder, encoderUnitsPerCount, accelSetting, homeBackoff)
-          VelmexAxisConfig("{{controller.name}}", {{motor}}, {{encoder}}, "{{ERES}}", {{accel_setting}}, {{home_backoff}})
+          # VelmexAxisConfig(motorPort, motor, encoder, encoderUnitsPerCount, accelSetting, homeBackoff, limitsActiveLow)
+          VelmexAxisConfig("{{controller.name}}", {{motor}}, {{encoder}}, "{{ERES}}", {{accel_setting}}, {{home_backoff}}, {{ 1 if limits_active_low else 0 }})
 
     databases:
       - file: VelmexMotor.db
