@@ -215,12 +215,16 @@ entity_models:
       NTM:
         type: bool
         description: |-
-          The record's new-target monitor: it stops a move whose readback
-          seems to go the wrong way and re-issues it. A readout whose display
-          lags the motion trips it mid-move (the fake run, and the record's
-          "tdir" message), so it is off here; a VAL changed mid-move waits
-          for the move to end
-        default: false
+          The record's new-target monitor, left at the record's default (on):
+          it stops a move only when the readback is past the target by more
+          than NTMF x (BDST + RDBD), which with this readout's lag means a real
+          overshoot (in the settle the VXM is idle and nothing is sent; during
+          an index a D limits it), and the record's retry logic then goes to
+          the target within RTRY: a stop costs one retry. In the repeat of
+          phase B (2026-10-29) its two stops were refused by device support
+          (the record was in COMM_ALARM) and the moves that brought the stage
+          back were the record's third retries
+        default: true
       TWV:
         type: float
         description: |-
