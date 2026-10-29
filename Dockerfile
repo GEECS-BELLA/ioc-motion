@@ -4,7 +4,8 @@ ARG REGISTRY=ghcr.io/epics-containers
 # Built on the simulated-motor developer image (ioc-motorsim R1-3ec2): EPICS
 # base, asyn, motor R7-4, autosave, busy, calc, sscan, sequencer, iocStats,
 # pvlogging and motorSim already built. ibek-support is pinned to the commit
-# that image was built with (8545fa2). motorNewport and motorAerotech are added.
+# that image was built with (8545fa2). motorNewport, motorAerotech and
+# motorPIGCS2 are added.
 ARG RUNTIME=${REGISTRY}/epics-base${IMAGE_EXT}-runtime:7.0.10ec2
 ARG DEVELOPER=${REGISTRY}/ioc-motorsim${IMAGE_EXT}-developer:R1-3ec2
 
@@ -43,6 +44,12 @@ RUN mkdir -p /epics/ibek-defs && ln -s ${SOURCE_FOLDER}/ibek-support-geecs/geecs
 # patch (read-only init, per-axis power policy) and the Ensemble entities (README "Aerotech Ensemble").
 COPY ibek-support-geecs/motorAerotech/ ${SOURCE_FOLDER}/ibek-support-geecs/motorAerotech/
 RUN ansible.sh motorAerotech
+
+# motorPIGCS2 R1-3-1: our recipe (none upstream) with the PI hexapod patch
+# (no SVO at init, INI refused, VMO before each MOV: switches) and
+# the hexapod entities (README "PI hexapod (motorPIGCS2)").
+COPY ibek-support-geecs/motorPIGCS2/ ${SOURCE_FOLDER}/ibek-support-geecs/motorPIGCS2/
+RUN ansible.sh motorPIGCS2
 
 # get the ioc source and build it
 COPY ioc ${SOURCE_FOLDER}/ioc

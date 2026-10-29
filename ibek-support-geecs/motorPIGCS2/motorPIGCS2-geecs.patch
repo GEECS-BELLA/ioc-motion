@@ -1,0 +1,356 @@
+diff --git a/pigcs2App/Db/Makefile b/pigcs2App/Db/Makefile
+index cc4d4ee..840d48a 100644
+--- a/pigcs2App/Db/Makefile
++++ b/pigcs2App/Db/Makefile
+@@ -13,6 +13,8 @@ include $(TOP)/configure/CONFIG
+ #DB += xxx.db
+ 
+ DB += PI_SupportCtrl.db
++DB += PIHexapodMotor.db
++DB += PIHexapodCtrl.db
+ DB += PI_SupportError.db
+ DB += PI_Support.db
+ DB += PI_SupportCL.db
+diff --git a/pigcs2App/Db/PIHexapodCtrl.db b/pigcs2App/Db/PIHexapodCtrl.db
+new file mode 100644
+index 0000000..b11c50b
+--- /dev/null
++++ b/pigcs2App/Db/PIHexapodCtrl.db
+@@ -0,0 +1,55 @@
++# ioc-motion: the per-controller records of a PI hexapod that an IOC which only
++# sets positions needs: DEFER (the motor record's deferred moves: every axis's
++# VAL written while ON, then OFF, is one six-axis MOV), the pivot point as read
++# from the controller at init (SPI? RST: X Y Z here are PI's R S T) and the
++# driver's last GCS error. The pivot setters and CLEAR_ERR of upstream's
++# PI_SupportCtrl.db / PI_SupportError.db are left out on purpose.
++record(bo, "$(P)DEFER") {
++  field(DTYP, "asynInt32")
++  field(OUT, "@asynMask($(PORT),0,0)MOTOR_DEFER_MOVES")
++  field(SCAN, "Passive")
++  field(ZNAM, "OFF")
++  field(ONAM, "ON")
++  field(VAL, "0")
++}
++
++record(ai, "$(P)RBPIVOT_X")
++{
++	field(DESC, "Pivot R (SPI? at init)")
++	field(PINI, "1")
++	field(DTYP, "asynFloat64")
++	field(INP, "@asyn($(PORT),0,0)PI_SUP_RBPIVOT_X")
++	field(PREC, "3")
++	field(EGU, "mm")
++	field(SCAN, "I/O Intr")
++}
++
++record(ai, "$(P)RBPIVOT_Y")
++{
++	field(DESC, "Pivot S (SPI? at init)")
++	field(PINI, "1")
++	field(DTYP, "asynFloat64")
++	field(INP, "@asyn($(PORT),0,0)PI_SUP_RBPIVOT_Y")
++	field(PREC, "3")
++	field(EGU, "mm")
++	field(SCAN, "I/O Intr")
++}
++
++record(ai, "$(P)RBPIVOT_Z")
++{
++	field(DESC, "Pivot T (SPI? at init)")
++	field(PINI, "1")
++	field(DTYP, "asynFloat64")
++	field(INP, "@asyn($(PORT),0,0)PI_SUP_RBPIVOT_Z")
++	field(PREC, "3")
++	field(EGU, "mm")
++	field(SCAN, "I/O Intr")
++}
++
++record(longin, "$(P)LAST_ERR")
++{
++	field(DESC, "Last GCS error the driver saw")
++	field(DTYP, "asynInt32")
++	field(INP, "@asyn($(PORT),0,0)PI_SUP_LAST_ERR")
++	field(SCAN, "I/O Intr")
++}
+diff --git a/pigcs2App/Db/PIHexapodMotor.db b/pigcs2App/Db/PIHexapodMotor.db
+new file mode 100644
+index 0000000..42bbfca
+--- /dev/null
++++ b/pigcs2App/Db/PIHexapodMotor.db
+@@ -0,0 +1,34 @@
++# ioc-motion: one axis of a PI hexapod as a motor record on motorPIGCS2's
++# PIasynController (DTYP asynMotor), and nothing else: no auxiliary records with
++# links into the driver. RSTM defaults to Never, so the record never asks the
++# driver to redefine the position at init (devMotorAsyn's init_controller does
++# for RSTM Always, or NearZero/Conditional with a non-zero DVAL after an autosave
++# restore; the hexapod's POS redefine is not this IOC's to send). RTRY 0: the
++# controller positions itself, the record does not retry. DISP 1 refuses every
++# put to the record's fields (dbPutField: CA and dbpf) without stopping the
++# driver's status callbacks, so readbacks stay live. MRES is the driver's fixed
++# counting unit (1e-4 of the axis's unit: mm for X Y Z, degrees for U V W).
++record(motor, "$(P)$(M)")
++{
++	field(DESC, "$(DESC)")
++	field(DTYP, "asynMotor")
++	field(OUT,  "@asyn($(PORT),$(ADDR))")
++	field(DIR,  "$(DIR)")
++	field(VELO, "$(VELO)")
++	field(VBAS, "$(VBAS)")
++	field(VMAX, "$(VMAX=0)")
++	field(ACCL, "$(ACCL)")
++	field(BDST, "$(BDST)")
++	field(BVEL, "$(BVEL)")
++	field(BACC, "$(BACC)")
++	field(MRES, "$(MRES)")
++	field(PREC, "$(PREC)")
++	field(EGU,  "$(EGU)")
++	field(DHLM, "$(DHLM)")
++	field(DLLM, "$(DLLM)")
++	field(RDBD, "$(RDBD=0)")
++	field(RTRY, "$(RTRY=0)")
++	field(RSTM, "$(RSTM=Never)")
++	field(TWV,  "$(TWV=0.01)")
++	field(DISP, "$(DISP=0)")
++}
+diff --git a/pigcs2App/src/PIGCSController.cpp b/pigcs2App/src/PIGCSController.cpp
+index a173e52..8234f4f 100644
+--- a/pigcs2App/src/PIGCSController.cpp
++++ b/pigcs2App/src/PIGCSController.cpp
+@@ -482,7 +482,8 @@ asynStatus PIGCSController::getAxisPositionCts(PIasynAxis* pAxis)
+     	return status;
+     }
+ 
+-    pAxis->m_positionCts = int( (pos * double(pAxis->m_CPUnumerator) / double(pAxis->m_CPUdenominator))+0.5);
++    // ioc-motion: round to nearest (int() truncates toward zero: -0.46 read as -0.4599 at CPU 10000)
++    pAxis->m_positionCts = int( floor((pos * double(pAxis->m_CPUnumerator) / double(pAxis->m_CPUdenominator))+0.5) );
+     if (m_pInterface->m_pCurrentLogSink != NULL)
+     {
+     	asynPrint(m_pInterface->m_pCurrentLogSink, ASYN_TRACE_FLOW,
+diff --git a/pigcs2App/src/PIHexapodController.cpp b/pigcs2App/src/PIHexapodController.cpp
+index 2f7f0d6..0ef3ba2 100644
+--- a/pigcs2App/src/PIHexapodController.cpp
++++ b/pigcs2App/src/PIHexapodController.cpp
+@@ -15,7 +15,32 @@ Original Author: Steffen Rau
+ #include "PIasynAxis.h"
+ #include "PIInterface.h"
+ #include <stdlib.h>
++#include <string.h>
+ #include <epicsThread.h>
++#include <epicsString.h>
++#include <epicsExport.h>
++
++// ioc-motion (GEECS-BELLA): four iocsh variables, each defaulting to upstream's
++// behaviour; `variable()` lines in PI_GCS2Support.dbd make them settable from
++// st.cmd before the controller is created.
++//   PIHexapodInitServo   1: SVO <axis> 1 per axis at init (a write at every IOC start);
++//                        0: SVO? <axis> is read instead and reported.
++//   PIHexapodHomeAllowed 1: the record's HOMF/HOMR send INI X (the reference run);
++//                        0: refused with an error, nothing sent.
++//   PIHexapodVmoCheck    0: MOV straight away; 1: VMO with the same targets first,
++//                        and a "1" (not possible) refuses the move, nothing sent.
++//   PIHexapodSendVel     1: VEL <axis> <v> before every move (the record's VELO);
++//                        0: nothing, the platform's velocity stays the controller's.
++int PIHexapodInitServo = 1;
++int PIHexapodHomeAllowed = 1;
++int PIHexapodVmoCheck = 0;
++int PIHexapodSendVel = 1;
++extern "C" {
++epicsExportAddress(int, PIHexapodInitServo);
++epicsExportAddress(int, PIHexapodHomeAllowed);
++epicsExportAddress(int, PIHexapodVmoCheck);
++epicsExportAddress(int, PIHexapodSendVel);
++}
+ 
+ //#undef asynPrint
+ //#define asynPrint(user,reason,format...) 0
+@@ -93,6 +118,7 @@ asynStatus PIHexapodController::getStatus(PIasynAxis* pAxis, int& homing, int& m
+        homing = m_bHoming ? 1:0;
+ 
+        moving = pAxis->m_bMoving || pAxis->deferred_move;
++       servoControl = pAxis->m_bServoControl ? 1 : 0;   // ioc-motion: upstream left it uninitialized
+     return asynSuccess;
+ }
+ 
+@@ -126,7 +152,57 @@ asynStatus PIHexapodController::findConnectedAxes()
+ asynStatus PIHexapodController::initAxis(PIasynAxis* pAxis)
+ {
+     pAxis->m_movingStateMask = 1;
+-    return setServo(pAxis, 1);
++    if (PIHexapodInitServo)
++    {
++        return setServo(pAxis, 1);
++    }
++    // ioc-motion: read the servo state, set nothing
++    int servoState = 0;
++    asynStatus status = getServo(pAxis, servoState);
++    if (asynSuccess == status)
++    {
++        pAxis->m_bServoControl = (servoState == 1);
++    }
++    return status;
++}
++
++asynStatus PIHexapodController::setVelocityCts( PIasynAxis* pAxis, double velocity )
++{
++    if (!PIHexapodSendVel)
++    {
++        return asynSuccess;
++    }
++    return PIGCSController::setVelocityCts(pAxis, velocity);
++}
++
++asynStatus PIHexapodController::checkMovePossible(PIasynAxis* pAxis, const char* szTargets)
++{
++    if (!PIHexapodVmoCheck)
++    {
++        return asynSuccess;
++    }
++    char cmd[1100];
++    char buf[255];
++    epicsSnprintf(cmd, sizeof(cmd), "VMO%s", szTargets);
++    asynStatus status = m_pInterface->sendAndReceive(cmd, buf, 99);
++    if (asynSuccess != status)
++    {
++        asynPrint(m_pInterface->m_pCurrentLogSink, ASYN_TRACE_ERROR,
++                "PIHexapodController::checkMovePossible() VMO failed, status %d\n", status);
++        return status;
++    }
++    if (atoi(buf) != 0)
++    {
++        asynPrint(m_pInterface->m_pCurrentLogSink, ASYN_TRACE_ERROR,
++                "PIHexapodController::checkMovePossible() refused: VMO%s -> %s (target outside the workspace)\n", szTargets, buf);
++        if (NULL != pAxis && NULL != pAxis->m_pasynUser)
++        {
++            epicsSnprintf(pAxis->m_pasynUser->errorMessage, pAxis->m_pasynUser->errorMessageSize,
++                "move refused: VMO%s -> %s (target outside the hexapod workspace)", szTargets, buf);
++        }
++        return asynError;
++    }
++    return asynSuccess;
+ }
+ 
+ asynStatus PIHexapodController::getReferencedState(PIasynAxis* pAxis)
+@@ -163,6 +239,15 @@ asynStatus PIHexapodController::moveCts( PIasynAxis* pAxis, int targetCts )
+         double relative = double(targetCts - pAxis->m_positionCts) * pAxis->m_CPUdenominator / pAxis->m_CPUnumerator;
+         sprintf(cmd,"MRW %s %f", pAxis->m_szAxisName, relative);
+     }
++    if (m_targetMode == 0)
++    {
++        // ioc-motion: the same axis and target as the MOV, after the command word
++        status = checkMovePossible(pAxis, cmd + 3);
++        if (asynSuccess != status)
++        {
++            return status;
++        }
++    }
+     status = m_pInterface->sendOnly(cmd);
+     if (asynSuccess != status)
+     {
+@@ -206,6 +291,12 @@ asynStatus PIHexapodController::moveCts( PIasynAxis** pAxesArray, int* pTargetCt
+         strcat(cmd, subCmd);
+         pAxis->m_lastDirection = (pTargetCtsArray[axis] > pAxis->m_positionCts) ? 1 : 0;
+     }
++    // ioc-motion: the same targets as the MOV, after the command word
++    status = checkMovePossible(numAxes > 0 ? pAxesArray[0] : NULL, cmd + 3);
++    if (asynSuccess != status)
++    {
++        return status;
++    }
+     status = m_pInterface->sendOnly(cmd);
+     if (asynSuccess != status)
+     {
+@@ -426,6 +517,18 @@ asynStatus PIHexapodController::ReadPivotSettings()
+ 
+ asynStatus PIHexapodController::referenceVelCts( PIasynAxis* pAxis, double velocity, int forwards)
+ {
++    if (!PIHexapodHomeAllowed)
++    {
++        // ioc-motion: the hexapod's reference run (INI) is not this IOC's to start
++        asynPrint(m_pInterface->m_pCurrentLogSink, ASYN_TRACE_ERROR,
++                "PIHexapodController::referenceVelCts() refused: PIHexapodHomeAllowed is 0, INI not sent\n");
++        if (NULL != pAxis->m_pasynUser)
++        {
++            epicsSnprintf(pAxis->m_pasynUser->errorMessage, pAxis->m_pasynUser->errorMessageSize,
++                "home refused: PIHexapodHomeAllowed is 0 (INI is not this IOC's to send)");
++        }
++        return asynError;
++    }
+     asynStatus status = m_pInterface->sendOnly("INI X");
+     if (asynSuccess != status)
+     {
+diff --git a/pigcs2App/src/PIHexapodController.h b/pigcs2App/src/PIHexapodController.h
+index fc11048..1314da0 100644
+--- a/pigcs2App/src/PIHexapodController.h
++++ b/pigcs2App/src/PIHexapodController.h
+@@ -31,10 +31,9 @@ public:
+ 	virtual asynStatus init(void);
+ 	virtual asynStatus initAxis(PIasynAxis* pAxis);
+ 
+-    virtual asynStatus setVelocityCts( PIasynAxis* pAxis, double velocity )
+-    {
+-    	return PIGCSController::setVelocityCts(pAxis, velocity);
+-    }
++    // ioc-motion: PIHexapodSendVel 0 sends no VEL before a move (the platform's
++    // velocity stays the controller's); 1 is upstream's VEL <axis> <v>.
++    virtual asynStatus setVelocityCts( PIasynAxis* pAxis, double velocity );
+ 
+ 	virtual asynStatus setAccelerationCts( PIasynAxis* pAxis, double acceleration)	{ return asynSuccess; }
+ 	virtual asynStatus setAcceleration( PIasynAxis* pAxis, double acceleration)	{ return asynSuccess; }
+@@ -55,6 +54,8 @@ public:
+ 
+ 	virtual asynStatus moveCts( PIasynAxis* pAxis, int target);
+ 	virtual asynStatus moveCts( PIasynAxis** pAxesArray, int* pTargetCtsArray, int numAxes);
++    // ioc-motion: VMO with the move's targets; asynError when the controller answers 1
++    asynStatus checkMovePossible(PIasynAxis* pAxis, const char* szTargets);
+     virtual asynStatus getAxisPosition(PIasynAxis* pAxis, double& position);
+ 
+     virtual asynStatus SetPivotX(double value);
+diff --git a/pigcs2App/src/PI_GCS2Support.dbd b/pigcs2App/src/PI_GCS2Support.dbd
+index 8d3ca9e..eff9d22 100644
+--- a/pigcs2App/src/PI_GCS2Support.dbd
++++ b/pigcs2App/src/PI_GCS2Support.dbd
+@@ -2,3 +2,8 @@
+ ##driver(PIasyn)
+ registrar(PIasynDriverRegister)
+ ##registrar(PIasynRegister)
++# ioc-motion (GEECS-BELLA): PI hexapod switches, upstream behaviour by default
++variable(PIHexapodInitServo, int)
++variable(PIHexapodHomeAllowed, int)
++variable(PIHexapodVmoCheck, int)
++variable(PIHexapodSendVel, int)
+diff --git a/pigcs2App/src/PIasynAxis.cpp b/pigcs2App/src/PIasynAxis.cpp
+index c725d90..1358558 100644
+--- a/pigcs2App/src/PIasynAxis.cpp
++++ b/pigcs2App/src/PIasynAxis.cpp
+@@ -51,7 +51,7 @@ PIasynAxis::PIasynAxis(PIasynController *pController, PIGCSController* pGCSContr
+ , m_lastDirection(0)
+ , m_CPUnumerator(1000)
+ , m_CPUdenominator(1)
+-, m_pasynUser(NULL)
++, m_pasynUser(pasynUser_)   // ioc-motion: upstream left it NULL (the base class's asynUser is set by now)
+ , m_bHasLimitSwitches(false)
+ , m_bHasReference(false)
+ , m_bProblem(false)
+@@ -260,7 +260,8 @@ asynStatus PIasynAxis::move(double position, int relative, double minVelocity, d
+ 		setIntegerParam(pController_->motorStatusDone_, 0);
+ 		callParamCallbacks();
+ 
+-		status = m_pGCSController->moveCts(this, position);
++		// ioc-motion: the record's counts arrive as a double (17.7 / 1e-4 = 176999.99999999997): round, do not truncate
++		status = m_pGCSController->moveCts(this, int(floor(position + 0.5)));
+    }
+     epicsEventSignal(pController_->pollEventId_);
+ 
+diff --git a/pigcs2App/src/PIasynController.cpp b/pigcs2App/src/PIasynController.cpp
+index b993d1a..b1ccbc7 100644
+--- a/pigcs2App/src/PIasynController.cpp
++++ b/pigcs2App/src/PIasynController.cpp
+@@ -247,7 +247,7 @@ asynStatus PIasynController::processDeferredMoves()
+         if (pAxis->deferred_move)
+         {
+         	pAxesArray[numDeferredAxes] = pAxis;
+-        	targetsCts[numDeferredAxes] = pAxis->deferred_position;
++        	targetsCts[numDeferredAxes] = int(floor(pAxis->deferred_position + 0.5));   // ioc-motion: round, do not truncate
+         	pAxis->setIntegerParam(motorStatusDone_, 0);
+         	pAxis->callParamCallbacks();
+         	numDeferredAxes++;

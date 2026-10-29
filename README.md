@@ -10,10 +10,11 @@ pvlogging, **motorSim**) plus:
 |---|---|---|---|
 | motorNewport | R1-3 | [epics-motor/motorNewport](https://github.com/epics-motor/motorNewport) (ships no LICENSE file; tier 1 rests on the epics-motor org, geecs-epics device catalogue) | tier 1, dependency, with one build-time patch (below: ESP300, SMC100) |
 | motorAerotech | R1-1-1 | [epics-motor/motorAerotech](https://github.com/epics-motor/motorAerotech) (ships no LICENSE file either; `drvEnsembleAsyn.cc` cites a synApps licence it does not ship); no upstream ibek-support recipe, so ours | tier 1, dependency, with one build-time patch (below) |
+| motorPIGCS2 | R1-3-1 | [epics-motor/motorPIGCS2](https://github.com/epics-motor/motorPIGCS2) (EPICS Open License); no upstream ibek-support recipe (INFN's targets their fork), so ours | tier 1, dependency, with one build-time patch of switches (below: PI hexapod) |
 
 Drivers for the other families geecs-epics' device catalogue assigns to
-this image (NewFocus Picomotor, Zaber, PI GCS2) join it when their first
-device is ported.
+this image (NewFocus Picomotor, Zaber) join it when their first device is
+ported.
 
 ## Build
 
@@ -525,6 +526,92 @@ each axis's policy and state.
 - The controller closes a socket idle longer than its `Socket2Timeout`; the
   idle poll (a period below it) is what keeps the socket open
   (`docs/README_Ensemble.md`).
+
+## PI hexapod (motorPIGCS2)
+
+`motorPIGCS2` (epics-motor, R1-3-1) is PI's own GCS driver family: one
+`PI_GCS2_CreateController` per controller, which asks `*IDN?` at creation and
+picks a controller class from the answer (the reply is upper-cased before the
+match). PI's old "Hexapod" controller (the DOS controller of the M-8x0
+hexapods, `*IDN?` `PHYSIK INSTRUMENTE (PI),Hexapod,0,V5.1.8 ...`, GCS-1)
+lands on `PIHexapodController`: six axes X Y Z U V W (driver axes 0-5),
+positions in mm and degrees, the driver's counting unit a fixed 1e-4. The
+first unit is GEECS-BELLA/geecs-epics `services/hextest1` (its README has the
+dialect as the controller answered it; no manual exists for this controller).
+The ibek entities (`ibek-support-geecs/motorPIGCS2/motorPIGCS2.ibek.support.yaml`):
+
+- `geecsSerial.Port` — the line: 57600 8N1, no handshake, LF. The driver
+  sets the asyn port's terminators itself (input `\n`, output none: it
+  appends LF to every command and sends the single-byte commands bare).
+- `motorPIGCS2.PIHexapodController` — the driver on that port, six axes,
+  poll periods and the four switches below; loads `PIHexapodCtrl.db`
+  (`DEFER`, `RBPIVOT_X/Y/Z`, `LAST_ERR`).
+- `motorPIGCS2.PIHexapodAxis` — one axis as a motor record on
+  `PIHexapodMotor.db` (added by the patch: RSTM Never, RTRY 0, DISP on by
+  default), `ADDR` from the axis letter, `MRES` 1e-4.
+
+**Deferred moves.** `$(P)DEFER` ON, a VAL per axis, `DEFER` OFF: the driver
+sends one `MOV X .. Y .. ..` for every deferred axis (the GEECS `xyzuvw` set).
+With `DEFER` OFF each VAL is its own `MOV <axis> <target>`.
+
+**Limits.** The record's DHLM/DLLM are the GEECS DB's operating ranges; the
+hexapod's workspace is coupled, so the controller's own `VMO` (virtual move)
+is the real limit, asked before every `MOV` when `vmo_check` is on (below).
+
+### What the stock driver sends, and the patch
+
+Creation: `*IDN?`, `VEL?` (the controller knows it, so the driver sends
+velocities), `#4` and `#3` (this controller answers `#3` with the six
+positions in one reply, as seen on the bench 2026-10-29), `SPI?
+RST`; then per axis **`SVO <axis> 1`** (a write), `VEL? <axis>`, `POS?
+<axis>`, `#4`. The poller, idle: `#5`, then `POS? <axis>` per axis, at `idle_poll_ms`;
+while `#5` reads non-zero: `#3` about every 45 ms (the bench, 2026-10-29:
+325 in a 15 s move) whatever `moving_poll_ms` says. A move:
+**`VEL <axis> <v>`** (the record's VELO) then `MOV <axis> <target>`, `#5`
+0.2 s later, `ERR?` if not moving. A home: **`INI X`**, the hexapod's
+reference run (every axis, to 0). A stop: the single byte `#24`, then `ERR?`
+expecting 10.
+
+`motorPIGCS2-geecs.patch` adds four iocsh variables, each defaulting to
+upstream behaviour (`variable()` lines in `PI_GCS2Support.dbd`), and one fix:
+
+| Variable | upstream | the other value |
+|---|---|---|
+| `PIHexapodInitServo` | 1: `SVO <axis> 1` per axis at init | 0: `SVO? <axis>` read and reported, nothing set |
+| `PIHexapodHomeAllowed` | 1: HOMF/HOMR send `INI X` | 0: refused with an error, nothing sent |
+| `PIHexapodVmoCheck` | 0: `MOV` straight away | 1: `VMO` with the same targets first; a `1` (not possible) refuses the move with an error, `MOV` not sent |
+| `PIHexapodSendVel` | 1: `VEL <axis> <v>` before every move | 0: nothing; the platform's velocity stays the controller's |
+| `getStatus` servo state | left uninitialized (random problem bit) | the state the driver knows (fix, no switch) |
+| position counts | `int(x + 0.5)`: truncation toward zero reads -0.46 as -0.4599 | rounded to nearest (fix, no switch) |
+| target counts | the record's counts (a double, 17.7 / 1e-4 = 176999.99999999997) truncated to int in `move` and in the deferred-move array: `MOV Y 17.699900` for a 17.7 target | rounded to nearest (fix, no switch) |
+| `PIasynAxis::m_pasynUser` | never set: a null write on upstream's own `INI` failure path | set from the axis's asynUser at construction, so the driver's error messages reach the record (fix, no switch) |
+
+`PIHexapodController`'s `init_servo`, `home_allowed`, `vmo_check` and
+`send_velocity` render them and default to false, false, true, false: an IOC
+start sends queries only, the record cannot home the hexapod, every move is
+checked against the controller's workspace, and the controller's velocity is
+left alone. They are global to the IOC (every PI hexapod in it). The patch
+also adds `PIHexapodMotor.db` and `PIHexapodCtrl.db` (the pivot readbacks
+and the last error only: upstream's `PI_SupportCtrl.db` pivot setters and
+`PI_SupportError.db`'s `CLEAR_ERR` are not loaded).
+
+### Known gaps (R1-3-1, with the patch), from reading it
+
+- **A refused move ends where it is.** `VMO` answering `1` (or the
+  controller refusing the `MOV`) returns an error from the driver's `move`;
+  the record completes the move at the old position and the message is in
+  the IOC log (`PIHexapodController::checkMovePossible() refused ...`), not
+  in a PV. `LAST_ERR` shows the controller's error codes only.
+- **The moving poll is fast**: while `#5` reads non-zero the driver sends `#3`
+  about every 45 ms whatever `moving_poll_ms` says (325 in a 15 s move on the
+  bench). One six-line reply is ~16 ms at 57600 baud, so the line keeps up;
+  the idle poll obeys `idle_poll_ms`.
+- **The travel limits the driver reports are fixed at ±100** (`getTravelLimits`);
+  the record's own DHLM/DLLM are what limit a VAL.
+- **`CanCommunicateWhileHoming` is false**: during an `INI` (which this IOC
+  never sends) the poller is silent until `#5` reads 0.
+- **Positions while moving** come from `#3` (all six in one reply); idle
+  positions from `POS?` per axis, six round trips per cycle at 57600 baud.
 
 ## Template Info
 This repository was generated by
