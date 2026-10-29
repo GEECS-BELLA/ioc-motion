@@ -11,6 +11,7 @@ pvlogging, **motorSim**) plus:
 | motorNewport | R1-3 | [epics-motor/motorNewport](https://github.com/epics-motor/motorNewport) (ships no LICENSE file; tier 1 rests on the epics-motor org, geecs-epics device catalogue) | tier 1, dependency, with one build-time patch (below: ESP300, SMC100) |
 | motorAerotech | R1-1-1 | [epics-motor/motorAerotech](https://github.com/epics-motor/motorAerotech) (ships no LICENSE file either; `drvEnsembleAsyn.cc` cites a synApps licence it does not ship); no upstream ibek-support recipe, so ours | tier 1, dependency, with one build-time patch (below) |
 | motorPIGCS2 | R1-3-1 | [epics-motor/motorPIGCS2](https://github.com/epics-motor/motorPIGCS2) (EPICS Open License); no upstream ibek-support recipe (INFN's targets their fork), so ours | tier 1, dependency, with one build-time patch of switches (below: PI hexapod) |
+| motorNewFocus | master 0f86a5b (2026-04-29; past R1-3) | [epics-motor/motorNewFocus](https://github.com/epics-motor/motorNewFocus) (ships no LICENSE file, as motorNewport); no upstream ibek-support recipe (TAU Systems' fork has a stock R1-3 one: tier 2, not used), so ours | tier 1, dependency, with one build-time patch of switches and fixes (below: NewFocus 8742 Picomotor) |
 
 Drivers for the other families geecs-epics' device catalogue assigns to
 this image (NewFocus Picomotor, Zaber) join it when their first device is
@@ -785,6 +786,94 @@ snapshot of 2026-10-29 (geecs-epics `services/vxmtest1`) settled the
 Local-mode command set and the readout's reply format; the motion phase
 measured MRES (0.2503 mm per step) and found the readout's display lag; the
 limit polarity waits for a switch.
+
+## NewFocus 8742 Picomotor
+
+`motorNewFocus`'s `874xMotorDriver` (epics-motor; APS) is a "model 3"
+asynMotor driver for the NewFocus 8742 (open loop, four Picomotor channels)
+and the 8743-CL (closed loop, two). One `nf874xCreateController` per TCP
+connection to a controller's Ethernet command port (TCP 23; CR out, CR LF
+in); the controllers of an RS-485 chain sit behind the master, four channels
+each, addressed `<controller>><channel>`. USB (vendor class `104d:4000`, the
+LabVIEW driver's route through NewFocus's .NET library) has no asyn route on
+Linux. The pin is master 0f86a5b rather than R1-3: upstream #19 (every axis
+`n>m` once a chain is configured; R1-3 sent bare numbers to the master's
+channels and a chain moved both controllers) and #17 (a sleep before each
+write-only command; back-to-back writes offset the replies from their
+commands). The first unit is GEECS-BELLA/geecs-epics
+`services/undulator/motion/pmtest1` (proven on its fake only).
+The ibek entities (`ibek-support-geecs/motorNewFocus/motorNewFocus.ibek.support.yaml`):
+
+- `motorNewFocus.NF874xController` — the asyn IP port (`<name>_IP`, its
+  terminators, the optional trace) and the driver: `num_axes` (4 per
+  controller on the connection), poll periods, `write_only_delay_ms` (10,
+  upstream's example), and the two switches below. The 8742's Ethernet port
+  is not a serial line, so it takes no `geecsSerial.Port` (as
+  `ESP300Controller`).
+- `motorNewFocus.NF874xAxis` — one channel (`unit` on the chain, `channel`
+  1-4: ADDR = 4 x (unit - 1) + channel) as a motor record on
+  `NF874xMotor.db` (added by the patch: MRES 1 step, EGU steps, RTRY 0, RSTM
+  Never, DISP on by default).
+
+**Open loop.** The readback is `TP?`, the controller's step count since
+power-up or the last `DH`; nothing measures the actuator. The record's
+retries would compare the count with itself, hence RTRY 0. A position
+redefine is the record's SET (`DH <n>`); RSTM Never and no autosave keep a
+boot from sending one.
+
+### What the stock driver and record send, and the patch
+
+Creation: `VE?` (the model, to pick open or closed loop). For an 8742, the
+axes send nothing; the poller sends `<axis> TP?` and `<axis> MD?` per axis
+(an 8743-CL adds `MM?`, `SR?`, `SL?`, `PH?`). Note the driver passes
+num_axes + 1 to its base class, so with four channels the internal count is
+5 > 4 and **every** axis takes the chain form `1>n` even on a lone controller
+(upstream's comment: `1>n` addresses the same motor as bare `n`; unconfirmed
+on our hardware). A move: `AC <a>`, `VA <v>`, then `PA <p>` (or `PR`), each
+`%f`. A jog: `AC`, `VA`, `MV +|-`. A stop: `ST`. SET: `DH <p>`.
+
+The record's init writes: `motorRecord.cc init_record` calls
+`set_dial_highlimit` / `set_dial_lowlimit`, which reach the driver's
+`setHighLimit` / `setLowLimit` as **`<axis> SR <v>`** and **`<axis> SL <v>`**
+for every axis at every boot (and on every DHLM/DLLM change). SR and SL are
+8743-CL commands; an 8742 would queue a "command does not exist" error per
+axis. `devMotorAsyn init_controller` writes the encoder ratio (no wire
+traffic) and, under RSTM's conditions, `DH` (RSTM Never here). A home sends
+**`MT`/`MZ`** (8743-CL limit or index searches; an open-loop Picomotor has
+no switch).
+
+`motorNewFocus-geecs.patch` adds two iocsh variables, each defaulting to
+upstream behaviour (`variable()` lines in `devNewFocus.dbd`), two fixes and
+the database:
+
+| Variable | upstream | the other value |
+|---|---|---|
+| `nf874xSetLimits` | 1: `SR`/`SL` from the record's DHLM/DLLM at init and on change | 0: kept in the driver, nothing sent; the record enforces its own limits |
+| `nf874xHomeAllowed` | 1: HOMF/HOMR send `AC`, `VA`, `MT`/`MZ` | 0: refused with an error, nothing sent |
+| `VE?` model parse | `strncpy` of 9 characters without a terminator, then a write through `strchr`'s result: a NULL dereference when the copy holds no space (an empty reply after a timeout, an identity such as `New_Focus 8742 ...`) | the model found anywhere in the reply (`8743-CL`, else `8742`), printed at start (fix, no switch) |
+| axis members on an 8742 | `limitChecking_`, the limits and the cached position set only for an 8743-CL: `home()` read an uninitialized flag | initialized for every model (fix, no switch) |
+
+`NF874xController`'s `set_limits` and `home_allowed` render them and default
+to false: an IOC start sends `VE?` and the poll only. They are global to the
+IOC (every 874x controller in it).
+
+### Known gaps (0f86a5b, with the patch), from reading it
+
+- **The record moves absolutely.** With RTRY 0 the record never asks for a
+  relative move, so `PR` (and the controller's own relative count) is
+  unused; a tweak is a `PA` to the new count.
+- **`%f` arguments.** Every numeric argument is sent as `%f`
+  (`1>1 PA 1300.000000`); whether the 8742 parses a decimal point is
+  unproven here (upstream's example IOC drives an 8742 this way).
+- **No limits, no home, no motor check.** The 8742 has no limit inputs;
+  MSTA's home bit is the driver's "position is 0". `MC` (motor check: one
+  step each way on every channel) and `QM` are never sent.
+- **The model parse decides the axis count per controller** (4 for an 8742,
+  2 for an 8743-CL): a mixed chain is not supported.
+- **The start-up message** prints the write-only delay in seconds and labels
+  it ms (upstream, cosmetic).
+- **A chain's slaves** are addressed through the master only; `SC` (scan the
+  chain) and `SA` (set an address) are configuration the IOC never sends.
 
 ## Licence
 

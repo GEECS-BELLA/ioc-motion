@@ -19,6 +19,8 @@ Details, the patch and the driver's gaps: `README.md`.
   `vxmtest1` (Velmex VXM + VRO `U_Velmex`, the 4 m undulator stage, two
   Digi ports over RFC 2217, profile `bench-vxm`) and its fake twin
   `vxmtest1-sim`.
+  `pmtest1` (NewFocus 8742 Picomotor, modelled on `U_BlueDiodePicos`;
+  fake only, profile `bench-pm`) and its twin `pmtest1-sim`.
 - **Why ours.** No epics-containers image carries motorNewport (TAU
   Systems' `ioc-motornewport` is tier 2, reference only: geecs-epics
   decision 10). The other motor families geecs-epics' device catalogue
@@ -44,6 +46,12 @@ Details, the patch and the driver's gaps: `README.md`.
   upstream; `on_for_move`; `keep_on`), `power_on_delay`, `power_off_delay`
   (README "Aerotech Ensemble", "Power policy"; proven on the controller 2026-10-29).
   The `EnsembleAxis` entity renders `UEIP` Yes (RBV from the encoder) and `RDBD`.
+  `ibek-support-geecs/motorNewFocus/motorNewFocus-geecs.patch`: iocsh
+  variables `nf874xSetLimits` and `nf874xHomeAllowed`, C default 1 (upstream:
+  the record's DHLM/DLLM sent as the 8743-CL's SR/SL at every init; HOMF/HOMR
+  send MT/MZ); the `NF874xController` entity's `set_limits` / `home_allowed`
+  default to false; plus the `VE?` parse fix and `NF874xMotor.db` (README
+  "NewFocus 8742 Picomotor").
 - **Images.** CI publishes on a git tag, CalVer `YYYY.M.N` (`2026.10.1`;
   never re-push a tag): `ghcr.io/geecs-bella/ioc-motion-runtime:<tag>` (what hosts
   pull, no credentials) and `-developer` (the release job runs in it; a build
