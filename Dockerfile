@@ -59,6 +59,15 @@ COPY ibek-support-geecs/motorVelmex/ ${SOURCE_FOLDER}/ibek-support-geecs/motorVe
 COPY motorVelmex/ /epics/support/motorVelmex/
 RUN ansible.sh motorVelmex
 
+# motorZaber: our driver for Zaber devices on the Zaber ASCII protocol
+# (A-series and X-series stages, X-MCC controllers, daisy chains; README
+# "Zaber (ASCII)"). Zaber's own motorZaberMotion ships no licence and needs
+# the Zaber Motion Library binaries, so it is a reference only (geecs-epics
+# decision 10); the source is in this repository (motorZaber/).
+COPY ibek-support-geecs/motorZaber/ ${SOURCE_FOLDER}/ibek-support-geecs/motorZaber/
+COPY motorZaber/ /epics/support/motorZaber/
+RUN ansible.sh motorZaber
+
 # get the ioc source and build it
 COPY ioc ${SOURCE_FOLDER}/ioc
 RUN ansible.sh ioc

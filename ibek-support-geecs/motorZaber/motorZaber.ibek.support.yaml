@@ -1,0 +1,254 @@
+# yaml-language-server: $schema=https://github.com/epics-containers/ibek/releases/download/3.0.1/ibek.support.schema.json
+
+# Zaber devices on the Zaber ASCII protocol, our driver (motorZaber/, README
+# "Zaber (ASCII)"). One serial line, a geecsSerial.Port with input EOS CR LF
+# and output EOS LF (the protocol's reply ends CR LF; a command may end CR,
+# LF or both), carrying one device or a daisy chain of them.
+
+module: motorZaber
+
+entity_models:
+  - name: ZaberController
+    description: |-
+      One Zaber ASCII line: the driver over one geecsSerial.Port (input_eos
+      '\r\n', output_eos '\n'). Creation sends nothing; each axis reads its
+      identity and stored settings once with "get" and polls "get pos" (and
+      "warnings" when a flag is up); nothing is ever "set", and the
+      broadcast address 0 is never used.
+    parameters:
+      name:
+        type: id
+        description: |-
+          The motor driver's asyn port name (the axes' PORT)
+      port:
+        type: object
+        description: |-
+          The geecsSerial.Port of the line
+      num_axes:
+        type: int
+        description: |-
+          Motor-record axes on this line (1..16), each a (device, axis) pair
+          given by a ZaberAxis
+        default: 1
+      moving_poll_ms:
+        type: int
+        description: |-
+          Poll period while an axis moves, ms. A poll is one "get pos" per
+          axis (plus "warnings" for an axis with a flag up)
+        default: 200
+      idle_poll_ms:
+        type: int
+        description: |-
+          Poll period while idle, ms; 0 = none
+        default: 1000
+
+    pre_init:
+      - value: |
+          # ZaberCreateController(motorPort, serialPort, numAxes, movingPollMs, idlePollMs)
+          ZaberCreateController("{{name}}", "{{port.name}}", {{num_axes}}, {{moving_poll_ms}}, {{idle_poll_ms}})
+
+  - name: ZaberAxis
+    description: |-
+      One Zaber axis as a motor record ($(P)$(M)) on ZaberMotor.db, with its
+      flags, identity and stored settings as $(P)$(M):<name> (ZaberAxis.db).
+      RSTM Never, DISP at boot. Positions in the device's native units
+      (microsteps), MRES converts.
+    parameters:
+      controller:
+        type: object
+        description: |-
+          The ZaberController of the line this axis is on
+      motor:
+        type: int
+        description: |-
+          This axis's number on the controller, 1..controller.num_axes
+          (the record's ADDR is motor - 1)
+      device:
+        type: int
+        description: |-
+          The device's address on the line, 1..99 (comm.address; a chain is
+          numbered 1, 2, ... from the computer by the last renumber, which
+          this IOC never sends)
+      axis:
+        type: int
+        description: |-
+          The axis on that device: 1 for an integrated stage, 1..4 on an X-MCC
+        default: 1
+      P:
+        type: str
+        description: |-
+          PV prefix, with its trailing colon
+      M:
+        type: str
+        description: |-
+          PV suffix of the motor record, e.g. m1
+      speed_args:
+        type: bool
+        description: |-
+          true: each move is "move abs <pos> <speed> <accel>" from the
+          record's VELO and ACCL (firmware 7.25 and up only); false: "move
+          abs <pos>" at the device's own stored maxspeed and accel, the
+          record's VELO then only informational. The driver never "set"s a
+          setting (they are the device's configuration, decision 15)
+        default: false
+      allow_home:
+        type: bool
+        description: |-
+          true: the record's HOMF/HOMR send "home" (toward the motor end at
+          the device's own approach speed; sets the reference); false: refused,
+          nothing sent
+        default: false
+      power_policy:
+        type: enum
+        description: |-
+          leave: never touch the driver; on_for_move: "driver enable" before
+          each move or home, "driver disable" power_off_delay seconds after
+          it ends (the LabVIEW driver's automotoroff / Disable.ChN)
+        values:
+          leave:
+          on_for_move:
+        default: leave
+      power_off_delay:
+        type: float
+        description: |-
+          Seconds after a move ends before "driver disable" (on_for_move);
+          resolved by the poll period
+        default: 0.5
+      DESC:
+        type: str
+        description: |-
+          Description
+        default: ""
+      EGU:
+        type: str
+        description: |-
+          Engineering units
+        default: mm
+      MRES:
+        type: float
+        description: |-
+          EGU per native unit (the device's microstep size at its resolution:
+          its user manual, or Zaber's device database by device id). No
+          default on purpose
+      PREC:
+        type: int
+        description: |-
+          Display precision
+        default: 4
+      DIR:
+        type: enum
+        description: |-
+          User direction
+        default: Pos
+        values:
+          Pos: Pos
+          Neg: Neg
+      VELO:
+        type: float
+        description: |-
+          Velocity (EGU/s); sent with each move only with speed_args
+      VMAX:
+        type: float
+        description: |-
+          Highest velocity the record accepts (EGU/s)
+      VBAS:
+        type: float
+        description: |-
+          Base velocity (EGU/s)
+        default: 0.0
+      ACCL:
+        type: float
+        description: |-
+          Seconds to velocity; sent as accel only with speed_args
+        default: 0.5
+      HVEL:
+        type: float
+        description: |-
+          Home velocity (EGU/s); unused: the device homes at its own
+          limit.approach.maxspeed
+        default: 1.0
+      BDST:
+        type: float
+        description: |-
+          The record's backlash distance (EGU); 0 = none
+        default: 0
+      BVEL:
+        type: float
+        description: |-
+          Backlash velocity (EGU/s)
+        default: 1
+      BACC:
+        type: float
+        description: |-
+          Backlash seconds to velocity
+        default: 0.5
+      DHLM:
+        type: float
+        description: |-
+          Dial high limit (EGU), the record's; the device also refuses targets
+          beyond its stored limit.max
+        default: 0
+      DLLM:
+        type: float
+        description: |-
+          Dial low limit (EGU); 0 and 0 = no record limits
+        default: 0
+      RDBD:
+        type: float
+        description: |-
+          Retry deadband (EGU)
+        default: 0.001
+      RTRY:
+        type: int
+        description: |-
+          Retries after a move that ends outside RDBD; 0 (the default): the
+          device closes its own loop on its microstep count
+        default: 0
+      TWV:
+        type: float
+        description: |-
+          Tweak step (EGU)
+        default: 0.1
+      DISP:
+        type: bool
+        description: |-
+          Disable puts to the record (DISP 1) at boot; readbacks stay live
+        default: true
+
+    pre_init:
+      - value: |
+          # ZaberAxisConfig(motorPort, motor, device, axis, speedArgs, allowHome, powerPolicy, powerOffDelay)
+          ZaberAxisConfig("{{controller.name}}", {{motor}}, {{device}}, {{axis}}, {{ 1 if speed_args else 0 }}, {{ 1 if allow_home else 0 }}, "{{power_policy}}", "{{power_off_delay}}")
+
+    databases:
+      - file: ZaberMotor.db
+        args:
+          P:
+          M:
+          DESC:
+          PORT: "{{controller.name}}"
+          ADDR: "{{motor - 1}}"
+          DIR:
+          VELO:
+          VMAX:
+          VBAS:
+          ACCL:
+          HVEL:
+          BDST:
+          BVEL:
+          BACC:
+          MRES:
+          PREC:
+          EGU:
+          DHLM:
+          DLLM:
+          RDBD:
+          RTRY:
+          TWV:
+          DISP: "{{ 1 if DISP else 0 }}"
+      - file: ZaberAxis.db
+        args:
+          P:
+          M:
+          PORT: "{{controller.name}}"
+          ADDR: "{{motor - 1}}"

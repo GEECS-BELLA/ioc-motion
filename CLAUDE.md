@@ -19,7 +19,10 @@ Details, the patch and the driver's gaps: `README.md`.
   `vxmtest1` (Velmex VXM + VRO `U_Velmex`, the 4 m undulator stage, two
   Digi ports over RFC 2217, profile `bench-vxm`) and its fake twin
   `vxmtest1-sim`; `agtest1` (Agilis AG-UC8 `U_ChicaneMotors`, USB serial on
-  htu-linux-camserv1, profile `bench-ag`).
+  htu-linux-camserv1, profile `bench-ag`); `zabertest1` (Zaber ASCII daisy
+  chain `U_Zaber`, stages on a Digi port over RFC 2217, profile
+  `bench-zaber`) and its fake twin `zabertest1-sim`, on this repo's
+  `feat/zaber-ascii` until a tag.
 - **Why ours.** No epics-containers image carries motorNewport (TAU
   Systems' `ioc-motornewport` is tier 2, reference only: geecs-epics
   decision 10). The other motor families geecs-epics' device catalogue

@@ -1,0 +1,71 @@
+# ioc-motion: what the Zaber driver reads for one axis beyond its motor record,
+# as $(P)$(M):<name>: the top warning flag of the last reply ("--" none), the
+# full flag list (the "warnings" query, read when the top flag is not "--"),
+# and, read once at start with "get": the firmware version, device id,
+# peripheral id (the stage on an X-MCC axis; 0 on an integrated device),
+# serial number, and the device's stored maxspeed (velocity data units:
+# microsteps/s x 1.6384), limit.min and limit.max (native units). Read-only
+# records, updated by the poller; nothing here writes to the device.
+record(stringin, "$(P)$(M):flag")
+{
+	field(DESC, "Top warning flag of the last reply")
+	field(DTYP, "asynOctetRead")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_FLAG")
+	field(SCAN, "I/O Intr")
+}
+record(stringin, "$(P)$(M):warnings")
+{
+	field(DESC, "All warning flags (warnings)")
+	field(DTYP, "asynOctetRead")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_WARNINGS")
+	field(SCAN, "I/O Intr")
+}
+record(stringin, "$(P)$(M):version")
+{
+	field(DESC, "Firmware (get version)")
+	field(DTYP, "asynOctetRead")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_VERSION")
+	field(SCAN, "I/O Intr")
+}
+record(longin, "$(P)$(M):device_id")
+{
+	field(DESC, "Device id (get deviceid)")
+	field(DTYP, "asynInt32")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_DEVICE_ID")
+	field(SCAN, "I/O Intr")
+}
+record(longin, "$(P)$(M):peripheral_id")
+{
+	field(DESC, "Peripheral id (get peripheralid)")
+	field(DTYP, "asynInt32")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_PERIPHERAL_ID")
+	field(SCAN, "I/O Intr")
+}
+record(longin, "$(P)$(M):serial")
+{
+	field(DESC, "Serial number (get system.serial)")
+	field(DTYP, "asynInt32")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_SERIAL")
+	field(SCAN, "I/O Intr")
+}
+record(ai, "$(P)$(M):maxspeed")
+{
+	field(DESC, "Stored maxspeed (data units)")
+	field(DTYP, "asynFloat64")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_MAXSPEED")
+	field(SCAN, "I/O Intr")
+}
+record(ai, "$(P)$(M):limit_min")
+{
+	field(DESC, "Stored limit.min (native units)")
+	field(DTYP, "asynFloat64")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_LIMIT_MIN")
+	field(SCAN, "I/O Intr")
+}
+record(ai, "$(P)$(M):limit_max")
+{
+	field(DESC, "Stored limit.max (native units)")
+	field(DTYP, "asynFloat64")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_LIMIT_MAX")
+	field(SCAN, "I/O Intr")
+}

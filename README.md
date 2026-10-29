@@ -13,8 +13,9 @@ pvlogging, **motorSim**) plus:
 | motorPIGCS2 | R1-3-1 | [epics-motor/motorPIGCS2](https://github.com/epics-motor/motorPIGCS2) (EPICS Open License); no upstream ibek-support recipe (INFN's targets their fork), so ours | tier 1, dependency, with one build-time patch of switches (below: PI hexapod) |
 
 Drivers for the other families geecs-epics' device catalogue assigns to
-this image (NewFocus Picomotor, Zaber) join it when their first device is
-ported.
+this image (NewFocus Picomotor) join it when their first device is
+ported. Ours, with no upstream module: `motorVelmex` (README "Velmex VXM +
+VRO") and `motorZaber` (README "Zaber (ASCII)").
 
 ## Build
 
@@ -1024,9 +1025,88 @@ Local-mode command set and the readout's reply format; the motion phase
 measured MRES (0.2503 mm per step) and found the readout's display lag; the
 limit polarity waits for a switch.
 
+## Zaber (ASCII)
+
+`ZaberDriver` (`motorZaber/`, ours) is a "model 3" asynMotor driver for Zaber
+devices on the Zaber ASCII protocol: A-series and X-series integrated
+stages, X-MCC controllers, and a daisy chain of them on one serial line.
+Written from Zaber's ASCII protocol manual (zaber.com/protocol-manual, read
+2026-10-29); no code copied. Why ours: Zaber's own
+[`zabertech/motorZaberMotion`](https://github.com/zabertech/motorZaberMotion)
+(v2.2.0) ships no licence, so it is a reference only (geecs-epics decision
+10), and it wraps the Zaber Motion Library's downloaded binaries (an online
+device database or a local sqlite copy, firmware 7.25 and up only). TAU
+Systems' ibek-support fork carries a recipe that pins it; CNPEM's
+`epics-in-docker` builds it. Diamond's `zaber_T-LSR` (epics-containers
+`ibek-runtime-streamdevice`) is the Binary T-series as plain records, not
+this protocol.
+
+The ibek entities (`ibek-support-geecs/motorZaber/motorZaber.ibek.support.yaml`):
+
+- a `geecsSerial.Port` for the line, input EOS `\r\n`, output EOS `\n` (a
+  reply ends CR LF; a command may end CR, LF or both). 115200 8N1 is the
+  ASCII default; a device left in Binary mode, or at 9600, answers nothing.
+- `motorZaber.ZaberController`: the driver on that port, the number of
+  record axes, poll periods. Creation sends nothing.
+- `motorZaber.ZaberAxis`: one record axis = one (device address, axis)
+  pair: a chain of integrated stages is addresses 1..n with axis 1 each, an
+  X-MCC one address with axes 1..4. A motor record on `ZaberMotor.db` (RSTM
+  Never, DISP on by default) and the axis's readings on `ZaberAxis.db` as
+  `$(P)$(M):flag`, `:warnings`, `:version`, `:device_id`, `:peripheral_id`,
+  `:serial`, `:maxspeed`, `:limit_min`, `:limit_max`. Switches, all off by
+  default: `speed_args`, `allow_home`, `power_policy`.
+
+**What goes down the line.** Every command is `/<device> <axis> <command>`
+to one device and axis: never the broadcast address 0, never `set`,
+`renumber` or `system ...`. Once per axis, `get version`, `get deviceid`
+(then `device.id` if rejected) and `get system.serial` on axis 0, and
+`get peripheralid` (then `peripheral.id`), `get maxspeed`, `get limit.min`
+and `get limit.max` on the axis. `ZaberAxisConfig` runs that pass and one
+poll before iocInit, so the record starts from the real position. Every
+poll: `get pos` (the position, IDLE or BUSY, the top warning flag), and
+`warnings` (the full flag list, a read) when that flag is not `--`. A move
+is `move abs <target>` (relative moves are added to the position just read;
+a BUSY axis refuses a move). With `speed_args` it is
+`move abs <target> <speed> <accel>`, from the record's velocity and
+acceleration in the protocol's data units (velocity: microsteps/s × 1.6384;
+accel: microsteps/s² × 1.6384 / 10000). That form exists from firmware 7.25
+only. Without it the device's own stored `maxspeed` and `accel` govern, and
+the record's VELO is informational. The driver never writes a setting: they
+are the device's configuration (decision 15's exception). A stop reads
+`get pos` afresh and sends `stop` only to a BUSY axis, because the record
+sends STOP to idle axes too. `home` is sent only with `allow_home`: it runs
+toward the motor end at the device's `limit.approach.maxspeed` and sets the
+reference (WR clears). `power_policy: on_for_move` sends `driver enable`
+before each move or home and `driver disable` `power_off_delay` s after it
+ends (the LabVIEW driver's `automotoroff`). Alerts (`!`), info lines (`#`)
+and replies from another address are skipped.
+
+**Status.** DONE = not BUSY. HOMED = no `WR` (no reference position) among
+the flags. PROBLEM = any fault flag (`F...`) except the driver being off:
+`FO` from firmware 7.11, and `FD` up to 7.10, where it meant "driver
+disabled" (from 7.11 it is a temperature or current fault). POWERED = no
+`FO` or disable-`FD`. Three failed polls in a row also set PROBLEM; a
+single one is a comm error and refuses moves. No limit switches as such:
+the device stops at its stored `limit.min`/`limit.max` and rejects targets
+beyond them (`RJ BADDATA`); `FE` is a fault. Positions are the device's
+native units (microsteps on a stepper, encoder counts on a direct drive).
+`MRES` is the microstep size at the device's resolution, from its manual
+or Zaber's device database by device id; the entity gives no default.
+
+**Refused, nothing sent:** jog (`moveVelocity`: a `move vel` that loses its
+stop runs to the end of travel; the record's tweaks are moves and work),
+`setPosition` (`set pos` would move the device's reference), and home
+without `allow_home`.
+
+**Known gaps:** no Binary protocol (the T-series); `NI`, `WL` and the other
+warnings are shown and never cleared (`warnings clear` is a write);
+lockstep, streams and the knob are not driven. The device's behaviour on a
+move without a reference (WR) is unverified. Proven only on geecs-epics'
+fake (`sim/zaber_sim.py`, 2026-10-29); U_Zaber's snapshot comes next.
+
 ## Licence
 
-GEECS's own work here (the Dockerfile changes, `motorVelmex`, the ibek
+GEECS's own work here (the Dockerfile changes, `motorVelmex`, `motorZaber`, the ibek
 support files and patches under `ibek-support-geecs/`, the docs) is under
 `LICENSE`, the GEECS licence: BSD-style, Copyright The Regents of the
 University of California, through Lawrence Berkeley National Laboratory, as in
