@@ -127,10 +127,10 @@ index a173e52..8234f4f 100644
      {
      	asynPrint(m_pInterface->m_pCurrentLogSink, ASYN_TRACE_FLOW,
 diff --git a/pigcs2App/src/PIHexapodController.cpp b/pigcs2App/src/PIHexapodController.cpp
-index 2f7f0d6..0ef3ba2 100644
+index 2f7f0d6..28917e5 100644
 --- a/pigcs2App/src/PIHexapodController.cpp
 +++ b/pigcs2App/src/PIHexapodController.cpp
-@@ -15,7 +15,32 @@ Original Author: Steffen Rau
+@@ -15,7 +15,48 @@ Original Author: Steffen Rau
  #include "PIasynAxis.h"
  #include "PIInterface.h"
  #include <stdlib.h>
@@ -150,20 +150,65 @@ index 2f7f0d6..0ef3ba2 100644
 +//                        and a "1" (not possible) refuses the move, nothing sent.
 +//   PIHexapodSendVel     1: VEL <axis> <v> before every move (the record's VELO);
 +//                        0: nothing, the platform's velocity stays the controller's.
++//   PIHexapodPosWithChar3 1: probe #3 at init and read positions with it while moving;
++//                        0: never send #3; positions while moving come from POS? <axis>.
++//                        (PIInterface::sendAndReceive(char) re-sends the byte for every
++//                        continuation line of a multi-line reply, so a six-line #3 reply
++//                        costs ~26 round trips under the port lock and only the first
++//                        axis parses.)
++//   PIHexapodJogAllowed  1: the record's JOGF/JOGR send MOV <axis> <travel limit>;
++//                        0: refused with an error, nothing sent.
++//   PIHexapodSetPosAllowed 1: the record's SET redefines the position (RON 0, POS, RON 1);
++//                        0: refused with an error, nothing sent.
 +int PIHexapodInitServo = 1;
 +int PIHexapodHomeAllowed = 1;
 +int PIHexapodVmoCheck = 0;
 +int PIHexapodSendVel = 1;
++int PIHexapodPosWithChar3 = 1;
++int PIHexapodJogAllowed = 1;
++int PIHexapodSetPosAllowed = 1;
 +extern "C" {
 +epicsExportAddress(int, PIHexapodInitServo);
 +epicsExportAddress(int, PIHexapodHomeAllowed);
 +epicsExportAddress(int, PIHexapodVmoCheck);
 +epicsExportAddress(int, PIHexapodSendVel);
++epicsExportAddress(int, PIHexapodPosWithChar3);
++epicsExportAddress(int, PIHexapodJogAllowed);
++epicsExportAddress(int, PIHexapodSetPosAllowed);
 +}
  
  //#undef asynPrint
  //#define asynPrint(user,reason,format...) 0
-@@ -93,6 +118,7 @@ asynStatus PIHexapodController::getStatus(PIasynAxis* pAxis, int& homing, int& m
+@@ -40,15 +81,22 @@ asynStatus PIHexapodController::init(void)
+         m_bCanReadStatusWithChar4 = false;
+         getGCSError(); // clear error UNKNOWN COMMAND
+     }
+-    status = m_pInterface->sendAndReceive(char(3), buf, 255);
+-    if (status == asynSuccess)
++    if (PIHexapodPosWithChar3)
+     {
+-        m_bCanReadPosWithChar3 = true;
++        status = m_pInterface->sendAndReceive(char(3), buf, 255);
++        if (status == asynSuccess)
++        {
++            m_bCanReadPosWithChar3 = true;
++        }
++        else if (status == asynTimeout)
++        {
++            m_bCanReadPosWithChar3 = false;
++            getGCSError(); // clear error UNKNOWN COMMAND
++        }
+     }
+-    else if (status == asynTimeout)
++    else
+     {
+-        m_bCanReadPosWithChar3 = false;
+-        getGCSError(); // clear error UNKNOWN COMMAND
++        m_bCanReadPosWithChar3 = false;   // ioc-motion: #3 never sent, POS? <axis> while moving
+     }
+ 
+     m_bHoming = false;
+@@ -93,6 +141,7 @@ asynStatus PIHexapodController::getStatus(PIasynAxis* pAxis, int& homing, int& m
         homing = m_bHoming ? 1:0;
  
         moving = pAxis->m_bMoving || pAxis->deferred_move;
@@ -171,7 +216,7 @@ index 2f7f0d6..0ef3ba2 100644
      return asynSuccess;
  }
  
-@@ -126,7 +152,57 @@ asynStatus PIHexapodController::findConnectedAxes()
+@@ -126,7 +175,57 @@ asynStatus PIHexapodController::findConnectedAxes()
  asynStatus PIHexapodController::initAxis(PIasynAxis* pAxis)
  {
      pAxis->m_movingStateMask = 1;
@@ -230,7 +275,7 @@ index 2f7f0d6..0ef3ba2 100644
  }
  
  asynStatus PIHexapodController::getReferencedState(PIasynAxis* pAxis)
-@@ -163,6 +239,15 @@ asynStatus PIHexapodController::moveCts( PIasynAxis* pAxis, int targetCts )
+@@ -163,6 +262,15 @@ asynStatus PIHexapodController::moveCts( PIasynAxis* pAxis, int targetCts )
          double relative = double(targetCts - pAxis->m_positionCts) * pAxis->m_CPUdenominator / pAxis->m_CPUnumerator;
          sprintf(cmd,"MRW %s %f", pAxis->m_szAxisName, relative);
      }
@@ -246,7 +291,7 @@ index 2f7f0d6..0ef3ba2 100644
      status = m_pInterface->sendOnly(cmd);
      if (asynSuccess != status)
      {
-@@ -206,6 +291,12 @@ asynStatus PIHexapodController::moveCts( PIasynAxis** pAxesArray, int* pTargetCt
+@@ -206,6 +314,12 @@ asynStatus PIHexapodController::moveCts( PIasynAxis** pAxesArray, int* pTargetCt
          strcat(cmd, subCmd);
          pAxis->m_lastDirection = (pTargetCtsArray[axis] > pAxis->m_positionCts) ? 1 : 0;
      }
@@ -259,8 +304,51 @@ index 2f7f0d6..0ef3ba2 100644
      status = m_pInterface->sendOnly(cmd);
      if (asynSuccess != status)
      {
-@@ -426,6 +517,18 @@ asynStatus PIHexapodController::ReadPivotSettings()
+@@ -235,8 +349,10 @@ asynStatus PIHexapodController::moveCts( PIasynAxis** pAxesArray, int* pTargetCt
+ asynStatus PIHexapodController::getAxisPosition(PIasynAxis* pAxis, double& position)
+ {
+     //m_pInterface->m_pCurrentLogSink = m_pInterface;
+-    if (!m_bAnyAxisMoving)
++    if (!m_bAnyAxisMoving || !PIHexapodPosWithChar3)
+     {
++        // ioc-motion: with PIHexapodPosWithChar3 0 the moving position is POS? <axis> too
++        // (upstream would return the last known position without asking)
+         return PIGCSController::getAxisPosition(pAxis, position);
+     }
+     if (m_bCanReadPosWithChar3)
+@@ -424,8 +540,49 @@ asynStatus PIHexapodController::ReadPivotSettings()
+     return status;
+ }
  
++asynStatus PIHexapodController::move(PIasynAxis* pAxis, double target)
++{
++    // ioc-motion: reached only from PIasynAxis::moveVelocity (the record's JOGF/JOGR),
++    // which would send MOV <axis> <travel limit> with no VMO; moveCts does not come here.
++    if (!PIHexapodJogAllowed)
++    {
++        asynUser* log = pAxis->m_pasynUser ? pAxis->m_pasynUser : m_pInterface->m_pCurrentLogSink;
++        asynPrint(log, ASYN_TRACE_ERROR,
++                  "PIHexapodController::move() refused: PIHexapodJogAllowed is 0 (a jog would send MOV %s %f)\n",
++                  pAxis->m_szAxisName, target);
++        return asynError;
++    }
++    return PIGCSController::move(pAxis, target);
++}
++
++asynStatus PIHexapodController::setAxisPosition(PIasynAxis* pAxis, double position)
++{
++    // ioc-motion: the record's SET (position redefine) would send RON <axis> 0, POS <axis> <v>, RON <axis> 1
++    if (!PIHexapodSetPosAllowed)
++    {
++        asynUser* log = pAxis->m_pasynUser ? pAxis->m_pasynUser : m_pInterface->m_pCurrentLogSink;
++        asynPrint(log, ASYN_TRACE_ERROR,
++                  "PIHexapodController::setAxisPosition() refused: PIHexapodSetPosAllowed is 0 (SET would send POS %s %f)\n",
++                  pAxis->m_szAxisName, position);
++        return asynError;
++    }
++    return PIGCSController::setAxisPosition(pAxis, position);
++}
++
  asynStatus PIHexapodController::referenceVelCts( PIasynAxis* pAxis, double velocity, int forwards)
  {
 +    if (!PIHexapodHomeAllowed)
@@ -279,7 +367,7 @@ index 2f7f0d6..0ef3ba2 100644
      if (asynSuccess != status)
      {
 diff --git a/pigcs2App/src/PIHexapodController.h b/pigcs2App/src/PIHexapodController.h
-index fc11048..1314da0 100644
+index fc11048..c5a729c 100644
 --- a/pigcs2App/src/PIHexapodController.h
 +++ b/pigcs2App/src/PIHexapodController.h
 @@ -31,10 +31,9 @@ public:
@@ -296,20 +384,24 @@ index fc11048..1314da0 100644
  
  	virtual asynStatus setAccelerationCts( PIasynAxis* pAxis, double acceleration)	{ return asynSuccess; }
  	virtual asynStatus setAcceleration( PIasynAxis* pAxis, double acceleration)	{ return asynSuccess; }
-@@ -55,6 +54,8 @@ public:
+@@ -55,7 +54,12 @@ public:
  
  	virtual asynStatus moveCts( PIasynAxis* pAxis, int target);
  	virtual asynStatus moveCts( PIasynAxis** pAxesArray, int* pTargetCtsArray, int numAxes);
 +    // ioc-motion: VMO with the move's targets; asynError when the controller answers 1
 +    asynStatus checkMovePossible(PIasynAxis* pAxis, const char* szTargets);
      virtual asynStatus getAxisPosition(PIasynAxis* pAxis, double& position);
++    // ioc-motion: the jog path (PIasynAxis::moveVelocity) and the record's SET, refused by switch
++    virtual asynStatus move(PIasynAxis* pAxis, double target);
++    virtual asynStatus setAxisPosition(PIasynAxis* pAxis, double position);
  
      virtual asynStatus SetPivotX(double value);
+     virtual asynStatus SetPivotY(double value);
 diff --git a/pigcs2App/src/PI_GCS2Support.dbd b/pigcs2App/src/PI_GCS2Support.dbd
-index 8d3ca9e..eff9d22 100644
+index 8d3ca9e..2e9282b 100644
 --- a/pigcs2App/src/PI_GCS2Support.dbd
 +++ b/pigcs2App/src/PI_GCS2Support.dbd
-@@ -2,3 +2,8 @@
+@@ -2,3 +2,11 @@
  ##driver(PIasyn)
  registrar(PIasynDriverRegister)
  ##registrar(PIasynRegister)
@@ -318,6 +410,9 @@ index 8d3ca9e..eff9d22 100644
 +variable(PIHexapodHomeAllowed, int)
 +variable(PIHexapodVmoCheck, int)
 +variable(PIHexapodSendVel, int)
++variable(PIHexapodPosWithChar3, int)
++variable(PIHexapodJogAllowed, int)
++variable(PIHexapodSetPosAllowed, int)
 diff --git a/pigcs2App/src/PIasynAxis.cpp b/pigcs2App/src/PIasynAxis.cpp
 index c725d90..1358558 100644
 --- a/pigcs2App/src/PIasynAxis.cpp

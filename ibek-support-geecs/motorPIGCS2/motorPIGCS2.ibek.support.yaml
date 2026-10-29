@@ -33,7 +33,8 @@ entity_models:
         type: int
         description: |-
           Poll period while the platform moves, ms. Each poll is one #5 for
-          the controller and POS? per axis.
+          the controller and POS? per axis (with pos_with_char3 false;
+          upstream would read #3 instead while moving).
         default: 500
       idle_poll_ms:
         type: int
@@ -72,15 +73,42 @@ entity_models:
           (the hexapod has one velocity for every axis). Applies to every PI
           hexapod controller in the IOC.
         default: false
+      pos_with_char3:
+        type: bool
+        description: |-
+          Upstream: probe #3 at init and read positions with it while moving.
+          On a controller that answers #3 with six lines, upstream's
+          single-byte read re-sends the byte for every continuation line
+          (~26 round trips under the port lock per read, only the first
+          axis parsed). false never sends #3: positions while moving come
+          from POS? <axis>. Applies to every PI hexapod controller in the IOC.
+        default: false
+      jog_allowed:
+        type: bool
+        description: |-
+          Upstream: the record's JOGF/JOGR send MOV <axis> <travel limit>
+          with no VMO. false refuses a jog with an error and sends nothing.
+          Applies to every PI hexapod controller in the IOC.
+        default: false
+      set_position_allowed:
+        type: bool
+        description: |-
+          Upstream: the record's SET (position redefine) sends RON <axis> 0,
+          POS <axis> <v>, RON <axis> 1. false refuses it with an error and
+          sends nothing. Applies to every PI hexapod controller in the IOC.
+        default: false
 
     pre_init:
       - when: first
         value: |
-          # ioc-motion's PI hexapod patch (README): upstream behaviour is 1, 1, 0, 1
+          # ioc-motion's PI hexapod patch (README): upstream behaviour is 1, 1, 0, 1, 1, 1, 1
           var PIHexapodInitServo {{ 1 if init_servo else 0 }}
           var PIHexapodHomeAllowed {{ 1 if home_allowed else 0 }}
           var PIHexapodVmoCheck {{ 1 if vmo_check else 0 }}
           var PIHexapodSendVel {{ 1 if send_velocity else 0 }}
+          var PIHexapodPosWithChar3 {{ 1 if pos_with_char3 else 0 }}
+          var PIHexapodJogAllowed {{ 1 if jog_allowed else 0 }}
+          var PIHexapodSetPosAllowed {{ 1 if set_position_allowed else 0 }}
       - value: |
           # PI_GCS2_CreateController(portName, asynPort, numAxes, priority, stackSize, movingPollMs, idlePollMs)
           PI_GCS2_CreateController("{{name}}", "{{port.name}}", 6, 0, 0, {{moving_poll_ms}}, {{idle_poll_ms}})

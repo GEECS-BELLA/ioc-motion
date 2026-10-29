@@ -17,11 +17,15 @@ libs:
   - motor
   - asyn
 
-# The patch (motorPIGCS2-geecs.patch): three iocsh variables, upstream
+# The patch (motorPIGCS2-geecs.patch): seven iocsh variables, upstream
 # behaviour (1 / 0 as noted) by default:
-#   PIHexapodInitServo   (PIHexapodController.cpp)  1: SVO <axis> 1 per axis at init; 0: SVO? <axis> read instead
-#   PIHexapodHomeAllowed (PIHexapodController.cpp)  1: INI X on the record's home; 0: refused with an error
-#   PIHexapodVmoCheck    (PIHexapodController.cpp)  0: none; 1: VMO <targets> before every MOV, "1" refuses the move
+#   PIHexapodInitServo     (PIHexapodController.cpp)  1: SVO <axis> 1 per axis at init; 0: SVO? <axis> read instead
+#   PIHexapodHomeAllowed   (PIHexapodController.cpp)  1: INI X on the record's home; 0: refused with an error
+#   PIHexapodVmoCheck      (PIHexapodController.cpp)  0: none; 1: VMO <targets> before every MOV, "1" refuses the move
+#   PIHexapodSendVel       (PIHexapodController.cpp)  1: VEL <axis> <v> before every move; 0: nothing
+#   PIHexapodPosWithChar3  (PIHexapodController.cpp)  1: #3 probed and used while moving; 0: never sent, POS? <axis>
+#   PIHexapodJogAllowed    (PIHexapodController.cpp)  1: JOGF/JOGR send MOV <axis> <limit>; 0: refused
+#   PIHexapodSetPosAllowed (PIHexapodController.cpp)  1: SET sends RON/POS/RON; 0: refused
 # and getStatus reporting the servo state it knows (upstream leaves it
 # uninitialized). It also adds pigcs2App/Db/PIHexapodMotor.db (RSTM Never,
 # RTRY 0, DISP) and PIHexapodCtrl.db (DEFER, the pivot readbacks, LAST_ERR).
