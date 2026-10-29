@@ -15,6 +15,7 @@
 #ifndef VelmexDriver_H
 #define VelmexDriver_H
 
+#include <epicsTime.h>
 #include "asynMotorController.h"
 #include "asynMotorAxis.h"
 
@@ -25,6 +26,9 @@
 #define VELMEX_MAX_INDEX 16777215L   /* I<m>M<x>: 1 to 16,777,215 steps; IA<m>M<x>: +/- the same */
 #define VELMEX_REPLY_LEN 64
 #define VELMEX_VXM_TIMEOUT 1.0       /* s, per reply; 9600 baud and a terminal server in between */
+#define VELMEX_SETTLE_COUNTS 2.0     /* readout readings this close count as unchanged */
+#define VELMEX_SETTLE_S 1.5          /* a move is done when the readout has been unchanged this long after the VXM idled */
+#define VELMEX_SETTLE_MAX_S 10.0     /* ... or this long after the VXM idled: done anyway, with a message */
 #define VELMEX_VRO_TIMEOUT 1.0
 
 /* Controller-wide readings beyond the motor record's (VelmexController.db) */
@@ -59,6 +63,10 @@ private:
   int limitsActiveLow_;    /**< 1: a limit input reads 0 when activated (the manual); 0: inverted */
   int moving_;             /**< This axis's program is running */
   int encoderOk_;          /**< The readout answered on the last poll: a reference exists */
+  int settling_;           /**< 1 while the VXM is idle and the readout has not settled yet */
+  double settleValue_;     /**< The readout value (counts) the settle clock is measuring from */
+  epicsTimeStamp settleStart_;  /**< When settleValue_ was first read */
+  epicsTimeStamp idleStart_;    /**< When the VXM was first seen idle after this move */
   int homing_;             /**< The running program is a home */
   int homed_;              /**< A home finished since the IOC started */
   int homeForwards_;       /**< The last home sought the positive limit */

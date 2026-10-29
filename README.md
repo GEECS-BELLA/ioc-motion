@@ -582,7 +582,15 @@ The readout answers `X` in Display mode without any mode command, and the
 driver never sends it one (`E`/`F` would put it in Setup mode and blank its
 buttons); a readout not in Display mode, or silent, is a problem on the
 record while the VXM's position and done state are still read, and no move
-is accepted until it answers again (no reference to close the loop on).
+is accepted until it answers again (no reference to close the loop on). A
+move is done when the VXM is idle **and** the readout has read the same
+value (within 2 counts) for 1.5 s, or 10 s after the VXM idled regardless
+(a message): U_Velmex's VRO displays a value that lags the motion by up to
+about a second, a retry judged against the stale value overshot by 90 mm
+(phase B, 2026-10-29), and a display refreshed once a second can read the
+same stale value on two polls half a second apart, so the wait is by the
+clock, not by the poll count. Every program is preceded by a fresh `V`: one sent
+to a running VXM would replace the program it is running.
 The readout's power-up start menu answers no position either (`V` says `P`);
 `F` then `Q` on its line takes it to Display mode, which the snapshot's
 `--identity` pass does and the driver does not. After a VXM power cycle the

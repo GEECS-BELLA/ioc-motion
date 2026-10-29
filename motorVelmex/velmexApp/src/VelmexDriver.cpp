@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 #include <ctype.h>
 
 #include <iocsh.h>
@@ -318,7 +319,7 @@ asynStatus VelmexController::poll()
 VelmexAxis::VelmexAxis(VelmexController *pC, int axisNo)
   : asynMotorAxis(pC, axisNo),
     pC_(pC), motor_(axisNo + 1), encoder_(0), eres_(1.0), accelSetting_(0), homeBackoff_(0), limitsActiveLow_(1),
-    moving_(0), homing_(0), homed_(0), homeForwards_(0), multiIndex_(0), lastSteps_(0), encoderOk_(0)
+    moving_(0), homing_(0), homed_(0), homeForwards_(0), multiIndex_(0), lastSteps_(0), encoderOk_(0), settling_(0), settleValue_(0.0)
 {
   setIntegerParam(pC_->motorStatusHasEncoder_, 0);
   setIntegerParam(pC_->motorStatusGainSupport_, 0);
@@ -357,12 +358,15 @@ asynStatus VelmexAxis::runProgram(const char *body, int multiIndex)
   char cmd[MAX_CONTROLLER_STRING_SIZE];
   asynStatus status;
 
-  if (pC_->busy()) {
+  /* A fresh V first: the last poll's letter may be up to a poll old, and a
+   * program sent to a running VXM would replace the one it is running. */
+  if (pC_->readStatus() != asynSuccess || pC_->busy()) {
     asynPrint(pasynUser_, ASYN_TRACE_ERROR,
-              "%s:%s: motor %d: the VXM is busy (status '%c'), program '%s' not sent\n",
+              "%s:%s: motor %d: the VXM is busy or silent (status '%c'), program '%s' not sent\n",
               driverName, functionName, motor_, pC_->vxmStatus_, body);
     return asynError;
   }
+  settling_ = 0;
   if (!pC_->online_ || pC_->local()) {
     status = pC_->writeVxm("F");
     if (status) return status;
@@ -464,7 +468,7 @@ asynStatus VelmexAxis::stop(double acceleration)
   /* Only a program of ours can be stopped. The record sends STOP on an idle
    * axis too ("just in case"), and the idle VXM is in Local mode, where D is
    * the digitizer dump (Appendix H: two position lines), not a stop. */
-  if (pC_->online_ && (moving_ || pC_->busy())) {
+  if (pC_->online_ && (pC_->busy() || (moving_ && settling_ == 0))) {
     /* Our own program: D for a one-index move (the program then ends), K for
      * the two-index home. A program this IOC did not start (an IOC restarted
      * mid-program): K, since D would only end its current index. */
@@ -529,26 +533,56 @@ asynStatus VelmexAxis::poll(bool *moving)
   setIntegerParam(pC_->motorStatusAtHome_, homeForwards_ ? highLimit : lowLimit);
   setIntegerParam(pC_->motorStatusHome_, homeForwards_ ? highLimit : lowLimit);
 
-  if (!pC_->busy() && moving_) {
-    moving_ = 0;
-    multiIndex_ = 0;
-    if (homing_) { homed_ = 1; homing_ = 0; }
-  }
-  *moving = moving_ ? true : false;
-  setIntegerParam(pC_->motorStatusDone_, moving_ ? 0 : 1);
-  setIntegerParam(pC_->motorStatusMoving_, moving_);
-  setIntegerParam(pC_->motorStatusHomed_, homed_);
-
-  /* The readout last: a readout silent or out of Display mode is a problem on
-   * the record (its RBV keeps the last value) but does not hold the record in
-   * a move the VXM has finished, and until it answers again no move is
-   * accepted (no reference: a retry against a stale REP would move wrong). */
-  if (encoder_ && pC_->pasynUserEncoder_) {
-    if (pC_->vroPollStatus_ || pC_->vroStatus_ != 'D') { encoderOk_ = 0; status = asynError; goto skip; }
-    status = pC_->readEncoder(encoder_, &value);
-    if (status) { encoderOk_ = 0; goto skip; }
-    encoderOk_ = 1;
-    setDoubleParam(pC_->motorEncoderPosition_, value / eres_);
+  {
+    /* The readout: silent or out of Display mode it is a problem on the record
+     * (its RBV keeps the last value) and no move is accepted until it answers
+     * again (no reference: a retry against a stale REP would move wrong). */
+    int encRead = 0;
+    if (encoder_ && pC_->pasynUserEncoder_ && !pC_->vroPollStatus_ && pC_->vroStatus_ == 'D' &&
+        pC_->readEncoder(encoder_, &value) == asynSuccess) {
+      encRead = 1;
+    }
+    /* Done = the VXM idle AND the readout settled. U_Velmex's VRO displays a
+     * value that lags the motion by up to about a second (phase B, 2026-10-29:
+     * a retry judged against the stale value overshot by 90 mm), and a display
+     * refreshed once a second can read the same stale value on two polls half
+     * a second apart, so the test is time-based: a move ends when the readout
+     * has read the same value (within VELMEX_SETTLE_COUNTS) for VELMEX_SETTLE_S
+     * since the VXM idled, or VELMEX_SETTLE_MAX_S after it idled regardless. */
+    if (moving_ && !pC_->busy()) {
+      epicsTimeStamp now;
+      int settled = 0;
+      epicsTimeGetCurrent(&now);
+      if (!encoder_ || !pC_->pasynUserEncoder_) {
+        settled = 1;
+      } else {
+        if (!settling_) { settling_ = 1; idleStart_ = now; settleStart_ = now; settleValue_ = encRead ? value / eres_ : 0.0; }
+        else if (encRead && fabs(value / eres_ - settleValue_) > VELMEX_SETTLE_COUNTS) { settleStart_ = now; settleValue_ = value / eres_; }
+        if (encRead && epicsTimeDiffInSeconds(&now, &settleStart_) >= VELMEX_SETTLE_S) {
+          settled = 1;
+        } else if (epicsTimeDiffInSeconds(&now, &idleStart_) >= VELMEX_SETTLE_MAX_S) {
+          asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+                    "%s:poll: motor %d: the readout did not settle within %.0f s of the VXM idling (last %.3f): done anyway\n",
+                    driverName, motor_, VELMEX_SETTLE_MAX_S, encRead ? value : 0.0);
+          settled = 1;
+        }
+      }
+      if (settled) {
+        moving_ = 0;
+        multiIndex_ = 0;
+        settling_ = 0;
+        if (homing_) { homed_ = 1; homing_ = 0; }
+      }
+    }
+    *moving = moving_ ? true : false;
+    setIntegerParam(pC_->motorStatusDone_, moving_ ? 0 : 1);
+    setIntegerParam(pC_->motorStatusMoving_, moving_);
+    setIntegerParam(pC_->motorStatusHomed_, homed_);
+    if (encoder_ && pC_->pasynUserEncoder_) {
+      if (!encRead) { encoderOk_ = 0; status = asynError; goto skip; }
+      encoderOk_ = 1;
+      setDoubleParam(pC_->motorEncoderPosition_, value / eres_);
+    }
   }
 
 skip:
