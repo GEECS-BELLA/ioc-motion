@@ -32,6 +32,7 @@ record(motor, "$(P)$(M)")
 	field(RDBD, "$(RDBD)")
 	field(RTRY, "$(RTRY)")
 	field(RSTM, "Never")
+	field(NTM,  "$(NTM)")
 	field(TWV,  "$(TWV)")
 	field(DISP, "$(DISP)")
 }

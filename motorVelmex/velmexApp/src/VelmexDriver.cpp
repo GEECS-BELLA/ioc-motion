@@ -75,7 +75,7 @@ VelmexController::VelmexController(const char *portName, const char *vxmPortName
                         ASYN_CANBLOCK | ASYN_MULTIDEVICE,
                         1, 0, 0),
     pasynUserEncoder_(NULL), online_(0), identified_(0),
-    vxmStatus_('?'), vroStatus_('?'), limitByte_(0xFF), pollStatus_(asynSuccess), vroPollStatus_(asynSuccess)
+    vxmStatus_('?'), vroStatus_('?'), limitByte_(0xFF), pollStatus_(asynSuccess), pollFailures_(0), vroPollStatus_(asynSuccess)
 {
   static const char *functionName = "VelmexController";
   asynStatus status;
@@ -301,10 +301,18 @@ asynStatus VelmexController::poll()
   if (s1 == asynSuccess && !online_) {
     if (writeVxm("F") == asynSuccess) { online_ = 1; vxmStatus_ = busy() ? 'B' : 'R'; }
   }
-  if (!identified_ && online_) identify();
-  asynStatus s2 = readLimits();
+  /* ? (and getD0) only when the VXM is idle: sent while a program runs they are
+   * not answered (U_Velmex's VXM, 2026-10-29: only the ^ of the index's end came,
+   * and the 1 s timeout ended the move on the record with a retry against the
+   * stale readout). The limit byte keeps its last value through a program; the
+   * VXM stops on a limit by itself and the first idle poll reads it. */
+  if (!identified_ && online_ && vxmStatus_ == 'R') identify();
+  asynStatus s2 = (s1 == asynSuccess && vxmStatus_ == 'R') ? readLimits() : asynSuccess;
   vroPollStatus_ = pasynUserEncoder_ ? readVroStatus() : asynSuccess;
-  pollStatus_ = (s1 || s2) ? asynError : asynSuccess;   /* the VXM alone: a silent readout must not hide the VXM */
+  /* A single timeout on a serial line is a comm error, not a problem: the record
+   * ends a move on RA_PROBLEM and retries on whatever REP it has. */
+  if (s1 || s2) pollFailures_++; else pollFailures_ = 0;
+  pollStatus_ = (pollFailures_ >= VELMEX_POLL_FAILURES) ? asynError : asynSuccess;
   s[0] = vxmStatus_;
   setStringParam(VelmexVxmStatus_, s);
   s[0] = vroStatus_;
@@ -319,7 +327,7 @@ asynStatus VelmexController::poll()
 VelmexAxis::VelmexAxis(VelmexController *pC, int axisNo)
   : asynMotorAxis(pC, axisNo),
     pC_(pC), motor_(axisNo + 1), encoder_(0), eres_(1.0), accelSetting_(0), homeBackoff_(0), limitsActiveLow_(1),
-    moving_(0), homing_(0), homed_(0), homeForwards_(0), multiIndex_(0), lastSteps_(0), encoderOk_(0), settling_(0), settleValue_(0.0), settleHave_(0)
+    moving_(0), homing_(0), homed_(0), homeForwards_(0), multiIndex_(0), lastSteps_(0), encoderOk_(0), failures_(0), settling_(0), settleValue_(0.0), settleHave_(0)
 {
   setIntegerParam(pC_->motorStatusHasEncoder_, 0);
   setIntegerParam(pC_->motorStatusGainSupport_, 0);
@@ -397,6 +405,12 @@ asynStatus VelmexAxis::move(double position, int relative, double minVelocity, d
   long now, target, speed;
   int n;
 
+  if (pC_->pollFailures_ > 0 || failures_ > 0) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+              "%s:%s: motor %d: the last poll failed (VXM %d, axis %d in a row): no fresh reference, move refused\n",
+              driverName, functionName, motor_, pC_->pollFailures_, failures_);
+    return asynError;
+  }
   if (encoder_ && pC_->pasynUserEncoder_ && !encoderOk_) {
     asynPrint(pasynUser_, ASYN_TRACE_ERROR,
               "%s:%s: motor %d: the readout did not answer on the last poll (status '%c'): no reference, move refused\n",
@@ -514,41 +528,39 @@ asynStatus VelmexAxis::setEncoderPosition(double position)
 
 asynStatus VelmexAxis::poll(bool *moving)
 {
-  asynStatus status = pC_->pollStatus_;
   long steps;
-  double value;
-  int lowLimit, highLimit;
+  double value = 0.0;
+  int fail = pC_->pollFailures_ > 0;     /* the controller's V or ? failed this poll */
+  int encRead = 0;
 
-  *moving = moving_ ? true : false;
-  if (status) goto skip;
-
-  status = pC_->readSteps(motor_, &steps);
-  if (status) goto skip;
-  lastSteps_ = steps;
-  setDoubleParam(pC_->motorPosition_, (double)steps);
-
-  {
+  if (!fail) {
+    if (pC_->readSteps(motor_, &steps) == asynSuccess) {
+      lastSteps_ = steps;
+      setDoubleParam(pC_->motorPosition_, (double)steps);
+    } else {
+      fail = 1;
+    }
+  }
+  if (!fail) {
     /* The manual's table: a limit input reads 0 when activated (N/C switches).
      * limitsActiveLow_ 0 inverts it for a stage wired the other way round
      * (U_Velmex's reads 0x0C at rest: motor 1's two bits low, off the switches). */
     int lowRaw = (pC_->limitByte_ & (1u << (2 * (motor_ - 1)))) != 0;
     int highRaw = (pC_->limitByte_ & (1u << (2 * (motor_ - 1) + 1))) != 0;
-    lowLimit = limitsActiveLow_ ? !lowRaw : lowRaw;
-    highLimit = limitsActiveLow_ ? !highRaw : highRaw;
-  }
-  setIntegerParam(pC_->motorStatusLowLimit_, lowLimit);
-  setIntegerParam(pC_->motorStatusHighLimit_, highLimit);
-  /* "At home" = on the limit this axis homes to. The record reads ATHM from the
-   * encoder home bit (EA_HOME, motorStatusHome_) when UEIP is Yes and from
-   * RA_HOME (motorStatusAtHome_) otherwise: set both. */
-  setIntegerParam(pC_->motorStatusAtHome_, homeForwards_ ? highLimit : lowLimit);
-  setIntegerParam(pC_->motorStatusHome_, homeForwards_ ? highLimit : lowLimit);
+    int lowLimit = limitsActiveLow_ ? !lowRaw : lowRaw;
+    int highLimit = limitsActiveLow_ ? !highRaw : highRaw;
+    setIntegerParam(pC_->motorStatusLowLimit_, lowLimit);
+    setIntegerParam(pC_->motorStatusHighLimit_, highLimit);
+    /* "At home" = on the limit this axis homes to. The record reads ATHM from the
+     * encoder home bit (EA_HOME, motorStatusHome_) when UEIP is Yes and from
+     * RA_HOME (motorStatusAtHome_) otherwise: set both. */
+    setIntegerParam(pC_->motorStatusAtHome_, homeForwards_ ? highLimit : lowLimit);
+    setIntegerParam(pC_->motorStatusHome_, homeForwards_ ? highLimit : lowLimit);
 
-  {
     /* The readout: silent or out of Display mode it is a problem on the record
-     * (its RBV keeps the last value) and no move is accepted until it answers
-     * again (no reference: a retry against a stale REP would move wrong). */
-    int encRead = 0;
+     * after VELMEX_POLL_FAILURES polls (its RBV keeps the last value) and no
+     * move is accepted until it answers again (no reference: a retry against a
+     * stale REP would move wrong). */
     if (encoder_ && pC_->pasynUserEncoder_ && !pC_->vroPollStatus_ && pC_->vroStatus_ == 'D' &&
         pC_->readEncoder(encoder_, &value) == asynSuccess) {
       encRead = 1;
@@ -588,22 +600,32 @@ asynStatus VelmexAxis::poll(bool *moving)
         if (homing_) { homed_ = 1; homing_ = 0; }
       }
     }
+    if (encoder_ && pC_->pasynUserEncoder_) {
+      if (encRead) {
+        encoderOk_ = 1;
+        setDoubleParam(pC_->motorEncoderPosition_, value / eres_);
+      } else {
+        encoderOk_ = 0;
+        fail = 1;
+      }
+    }
+  }
+
+  /* A failed poll keeps the last state (done, moving, positions) and says comm
+   * error; the record sees a problem, and ends a move on it, only after
+   * VELMEX_POLL_FAILURES polls in a row. */
+  if (fail) failures_++; else failures_ = 0;
+  {
+    int problem = pC_->pollFailures_ >= VELMEX_POLL_FAILURES || failures_ >= VELMEX_POLL_FAILURES;
     *moving = moving_ ? true : false;
     setIntegerParam(pC_->motorStatusDone_, moving_ ? 0 : 1);
     setIntegerParam(pC_->motorStatusMoving_, moving_);
     setIntegerParam(pC_->motorStatusHomed_, homed_);
-    if (encoder_ && pC_->pasynUserEncoder_) {
-      if (!encRead) { encoderOk_ = 0; status = asynError; goto skip; }
-      encoderOk_ = 1;
-      setDoubleParam(pC_->motorEncoderPosition_, value / eres_);
-    }
+    setIntegerParam(pC_->motorStatusProblem_, problem);
+    setIntegerParam(pC_->motorStatusCommsError_, fail);
+    callParamCallbacks();
+    return problem ? asynError : asynSuccess;
   }
-
-skip:
-  setIntegerParam(pC_->motorStatusProblem_, status ? 1 : 0);
-  setIntegerParam(pC_->motorStatusCommsError_, status ? 1 : 0);
-  callParamCallbacks();
-  return status;
 }
 
 /* ------------------------------------------------------------- iocsh */

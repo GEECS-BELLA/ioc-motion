@@ -212,6 +212,15 @@ entity_models:
           Use the readout as the position (true: the record's RBV is the
           encoder); false only with encoder 0
         default: true
+      NTM:
+        type: bool
+        description: |-
+          The record's new-target monitor: it stops a move whose readback
+          seems to go the wrong way and re-issues it. A readout whose display
+          lags the motion trips it mid-move (the fake run, and the record's
+          "tdir" message), so it is off here; a VAL changed mid-move waits
+          for the move to end
+        default: false
       TWV:
         type: float
         description: |-
@@ -255,4 +264,5 @@ entity_models:
           RDBD:
           RTRY:
           TWV:
+          NTM: "{{ 'YES' if NTM else 'NO' }}"
           DISP: "{{ 1 if DISP else 0 }}"
