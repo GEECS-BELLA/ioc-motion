@@ -67,7 +67,10 @@ second image needs it (decision 11).
 
 ## ESP300 family (ESP300 / ESP301 / ESP302)
 
-`drvESP300` + `devESP300` is a "model 2" motor driver: `ESP300Setup` once,
+`drvESP300` + `devESP300` is a model 1 motor driver (device support over
+`motordevCom`/`motordrvCom`: `struct motor_dset devESP300`, `struct
+driver_table ESP300_access`; motor's `docs/motorDeviceDriver.html` for the
+models): `ESP300Setup` once,
 `ESP300Config` per controller, motor records on `basic_motor.db` with DTYP
 `ESP300` and `OUT "#C<card> S<axis-1> @"`. The ESP302 is driven over its
 Ethernet command port (TCP 5001, one client at a time; an ESP301's RS-232 port
@@ -341,10 +344,11 @@ controller refuses them: access security, `DISP`): CNEN (L429-L466:
 and, in Use mode, a put to MRES, ERES or UEIP (motorRecord.cc L1937-L1990,
 `load_pos`) (**`POSOFFSET SET`**). The driver never sends `ACKNOWLEDGEALL`.
 
-`aerotech-ensemble-read-only-init.patch` (applied by
-`motorAerotech.install.yml` on upstream R1-1-1; `drvEnsembleAsyn.cc`,
-`devAerotech.dbd`, `Db/Makefile`, and the new `Db/EnsembleMotor.db`) adds one
-iocsh variable, upstream behaviour by default:
+`aerotech-ensemble.patch` (applied by `motorAerotech.install.yml` on upstream
+R1-1-1; `drvEnsembleAsyn.cc`, `devAerotech.dbd`, `Db/Makefile`, and the new
+`Db/EnsembleMotor.db`) carries two changes, each upstream behaviour by default:
+the read-only init (here) and the per-axis power policy (next section). The
+first is one iocsh variable:
 
 | Variable | 1 (upstream) | 0 |
 |---|---|---|
@@ -359,6 +363,97 @@ non-query as `WRITE`): with the switch at 0 no `WRITE` at init or in the
 poll; at 1 the fake logs `NONE`, three `RAMP MODE`s and `WAIT MODE NOWAIT`
 (geecs-epics `services/enstest1`). Not yet checked against a controller.
 Worth proposing upstream (a query probe; mode commands with each motion command).
+
+### Power policy (per axis)
+
+`drvEnsembleAsyn` is a model 2 driver (`motorAxisDrvSET_t`): model 3's
+auto-power (`asynMotorController`, `asyn_auto_power.db`) does not exist for
+it, and upstream's driver never enables or disables an axis on its own (only a
+CNEN put does: `ENABLE`/`DISABLE`, with a `FAULTACK` first on enable if a fault
+is latched). The patch adds a per-axis policy, set after `EnsembleAsynConfig`
+by one iocsh command per axis that is not `leave`:
+
+    EnsembleAxisPower(card, driverAxis, "on_for_move"|"keep_on"|"leave", onDelay_s, offDelay_s)
+
+rendered by the `EnsembleAxis` entity from `power_policy` (default `leave`: no
+line), `power_on_delay` and `power_off_delay`. The fields are the contract, not
+the mechanism: a model-3 driver would render the same three onto
+`AutoEnable`/`AutoEnableDelay`/`AutoDisableDelay` (and a `DLY` covering the off
+delay, plus a `setClosedLoop` that refuses false for `keep_on`).
+
+| `power_policy` | Before a move, jog or home | After it | CNEN puts |
+|---|---|---|---|
+| `leave` (default) | nothing (a move on a disabled axis faults at the controller, `#`, as upstream) | nothing | as upstream |
+| `on_for_move` | if `AXISSTATUS` reads disabled: `ENABLE @n`, which must be acknowledged (`%`), then `onDelay`, then `AXISSTATUS` must read enabled; otherwise no motion command, PROBLEM set. Never `FAULTACK` | done (DMOV) held at 0; `offDelay` after the end of motion (the poll that first sees it, moving poll period), `DISABLE @n`, which must be acknowledged, read back disabled (`AXISSTATUS` bit 0, `axis_enabled`, drvEnsembleAsyn.h) and read disabled again by the next poll; only then done, with CNEN 0 | as upstream on the wire, then `AXISSTATUS` read back (upstream checks neither reply): PROBLEM if the drive did not follow; a CNEN put ends a pending disable (the put decides) |
+| `keep_on` | the same enable | nothing | **CNEN 0 refused**: nothing sent, PROBLEM set, CNEN reads back the drive |
+
+Then the mode commands (`RAMP MODE`, `WAIT MODE NOWAIT`, both acknowledged or
+no motion, with `init_writes` false) and the motion command, as before. So an
+`on_for_move` move on the wire is `ENABLE`, `onDelay`, `RAMP MODE @n RATE`,
+`WAIT MODE NOWAIT`, `ABS`, `RAMP RATE`, `LINEAR`, end of motion, `offDelay`,
+`DISABLE`, and DMOV goes 1 one poll after the `DISABLE` is acknowledged and the
+drive reads disabled (upstream's CNEN path never checks either reply, so its
+CNEN readback alone proves nothing; this path does not trust a reply): a scan waiting
+on DMOV does not fire with the axis enabled. The exceptions, where the motor
+record ends the move itself (PROBLEM or a limit switch, motorRecord.cc
+L3741-L3746): a controller fault during the motion is disabled at once, in the
+poll that sees it, before DMOV (one `DISABLE`, acknowledged and read back, but
+no confirming poll and no retry: PROBLEM ends the move anyway); an `AXISFAULT`
+read that is not acknowledged,
+or a limit switch reached without a controller fault, ends DMOV while the axis
+is still held, and the disable follows `offDelay` later. Details:
+
+- **Boot, idle poll, IOC exit**: unchanged, queries only, under every policy.
+  An axis found enabled at boot stays so until its first `on_for_move` move
+  ends. Nothing runs at exit: an IOC killed mid-move, or inside the off window,
+  leaves the axis enabled (the controller finishes the `LINEAR` on its own).
+  Safe-off on an abnormal exit is the harness's (geecs-epics
+  `services/enstest1/phase_b.sh`: STOP, CNEN 0, verified) or the controller's.
+- **STOP/abort**: `ABORT @n` as upstream; its end of motion starts `offDelay`,
+  then `DISABLE`. A STOP put during `onDelay` waits (the port thread sleeps)
+  and aborts the move just sent.
+- **A refused move**: by the record's soft limits, nothing reaches the driver
+  (no enable); by the controller (a `LINEAR` answered `#`, failed mode
+  commands): the axis was enabled for it, so it is disabled `offDelay` later,
+  the same path.
+- **A failed `DISABLE`** (not acknowledged, or acknowledged with the drive
+  still reading enabled, then or on the next poll): retried on the next polls,
+  three tries in all, then done **with PROBLEM** (MAJOR alarm) and a console
+  line, CNEN and MSTA 0x20 showing the drive's own enabled bit: never
+  done-and-disabled on a reply alone. Likewise an `ENABLE` acknowledged with the
+  drive still reading disabled after `onDelay` sends no motion command (PROBLEM;
+  under `on_for_move` a `DISABLE` follows at once).
+- **Status unreadable while held**: ten polls in a row without a clean
+  `AXISSTATUS` end the hold with done, PROBLEM and CommError (an alarm, not a
+  DMOV 0 forever).
+- **PROBLEM** from a refusal or failure is sticky until the next accepted
+  motion or a CNEN put the drive is read to have followed (the poll's own
+  fault check would otherwise clear it).
+- **Done is plane-wide** (`PLANESTATUS(0)`, upstream): another axis moving in
+  plane 0 delays this axis's `offDelay` and its DMOV.
+- **New motion during a move or its off window**: the record still reads not
+  done, so a new VAL (or a jog) is a retarget (the record stops, waits for done,
+  then moves): `ABORT`, `offDelay`, `DISABLE`, `ENABLE`, `onDelay`, the move. `on_for_move` wants `BDST` 0 and `RTRY` 0 (the
+  entity's defaults): a backlash or retry move power-cycles the axis.
+- **Home**: the off delay starts only once `AXISSTATUS` shows neither
+  `move_active` nor `homing_active` (HomeAsync.bcx runs several moves); not yet
+  checked against the controller's home program.
+- **Limits checked at boot** (`EnsembleAxisPower` prints and sets the iocsh
+  error; the entity renders `on error halt` before it, so a refused policy
+  halts the IOC rather than booting as `leave`, and the command is refused
+  after iocInit): policy one of the three; `onDelay` 0..1 s (it sleeps in the
+  controller's asyn port thread with the axis mutex held: every command to
+  that controller, a STOP of another axis included, and the poll wait);
+  `on_for_move` needs `offDelay` ≥ the moving poll period (a shorter one can
+  take a not-yet-started motion for its end).
+- **Locking**: for a non-`leave` axis the axis mutex is held from the enable
+  check to the motion command, so the poller's `DISABLE` cannot fall between
+  them; `leave` takes upstream's path unchanged.
+
+Proved on geecs-epics' Ensemble fake (`services/enstest1/power_proofs.sh`, its
+record in `services/enstest1/README.md`); **the hardware check is owed**, the
+maintainer's to schedule (an `on_for_move` move of the separation axis with
+LabVIEW stopped). `dbior motorEnsemble 1` prints each axis's policy and state.
 
 ### Known gaps in the upstream driver (R1-1-1), from reading it
 

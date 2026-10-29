@@ -40,7 +40,7 @@ COPY ibek-support-geecs/geecsSerial/ ${SOURCE_FOLDER}/ibek-support-geecs/geecsSe
 RUN mkdir -p /epics/ibek-defs && ln -s ${SOURCE_FOLDER}/ibek-support-geecs/geecsSerial/geecsSerial.ibek.support.yaml /epics/ibek-defs/
 
 # motorAerotech R1-1-1: our recipe (none upstream) with the Ensemble
-# read-only-init patch and the Ensemble entities (README "Aerotech Ensemble").
+# patch (read-only init, per-axis power policy) and the Ensemble entities (README "Aerotech Ensemble").
 COPY ibek-support-geecs/motorAerotech/ ${SOURCE_FOLDER}/ibek-support-geecs/motorAerotech/
 RUN ansible.sh motorAerotech
 
