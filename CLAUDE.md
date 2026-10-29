@@ -10,7 +10,7 @@ takes (local tty, raw TCP, RFC 2217: geecs-epics decision 15).
 Details, the patch and the driver's gaps: `README.md`.
 
 - **Instances** live in GEECS-BELLA/geecs-epics, not here: `esptest1`
-  (ESP302 `U_ESP302_01`, `hosts/htu-linux-camserv2`, profile `bench-esp`)
+  (ESP302 `U_ESP302_01`, profile `bench-esp`)
   and its fake twin `esptest1-sim` (`hosts/sim`, profile `motion`);
   `enstest1` (Aerotech Ensemble `U_CompAerotech`, the compressor gratings,
   read-only, profile `bench-ens`); `smctest1` (SMC100PP `U_ProbeCamStage`
@@ -42,16 +42,20 @@ Details, the patch and the driver's gaps: `README.md`.
   iocsh `EnsembleAxisPower(card, axis, policy, onDelay, offDelay)`, rendered
   by the `EnsembleAxis` entity's `power_policy` (`leave` default: no call,
   upstream; `on_for_move`; `keep_on`), `power_on_delay`, `power_off_delay`
-  (README "Aerotech Ensemble", "Power policy"; on the controller 2026-10-29, the rerun owed).
+  (README "Aerotech Ensemble", "Power policy"; proven on the controller 2026-10-29).
   The `EnsembleAxis` entity renders `UEIP` Yes (RBV from the encoder) and `RDBD`.
-- **Build.** On the IOC host: `docker build --target runtime -t ioc-motion:local ~/ioc-motion`.
-  On a workstation: `DOCKER_DEFAULT_PLATFORM=linux/amd64 TARGET=runtime
-  TAG=ioc-motion:local ./build` (the variable is required on Apple silicon; the
-  image is amd64 and runs emulated).
-- **Pins.** geecs-epics' compose file notes the commit the host image was
-  built from. A bump: rebuild on the host (never during a run), update that
-  note in the same change, recreate the container (`docker restart` keeps
-  the old image), one IOC on the bench first.
+- **Images.** CI publishes on a git tag, CalVer `YYYY.M.N` (`2026.10.1`;
+  never re-push a tag): `ghcr.io/geecs-bella/ioc-motion-runtime:<tag>` (what hosts
+  pull, no credentials) and `-developer` (the release job runs in it; a build
+  base); the organisation's packages inherit the repository's visibility. Hosts
+  never build. Bench work from a branch: a pre-release tag (`2026.10.2b1`). A
+  local build for development:
+  `DOCKER_DEFAULT_PLATFORM=linux/amd64 TARGET=runtime TAG=ioc-motion:local ./build`
+  (the variable is required on Apple silicon; the image is amd64, emulated).
+- **Pins.** geecs-epics' compose files pin the tag. A bump: tag here, change
+  the tag in compose in one geecs-epics PR, `docker compose pull <service>`
+  and recreate on the host (`docker restart` keeps the old image), one IOC
+  on the bench first. Rollback: revert that compose change and recreate.
 - **Merging**: after a fresh-context review dispositioned on the PR, and the
   bench proof for anything that changes what reaches a device. Rules and
   program state: geecs-epics `CLAUDE.md`.
