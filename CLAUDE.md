@@ -64,9 +64,10 @@ Details, the patch and the driver's gaps: `README.md`.
   `nf874xCheckMoves` (C default 0, upstream: the error queue is never read, so
   a move the 8742 ignores ends silently); the `NF874xController` entity's
   `set_limits` / `home_allowed` / `jog_allowed` default to false and
-  `check_moves` to true; plus the `VE?` read fix (an empty reply), the 8742
-  axis members (undefined behaviour) and `NF874xMotor.db` (RTRY 1; README
-  "NewFocus 8742 Picomotor").
+  `check_moves` to true (every queued code charged to its own channel's
+  axis, shown only once that axis reads done); plus the `VE?` read fix (an
+  empty reply), the 8742 axis members (undefined behaviour) and
+  `NF874xMotor.db` (RTRY 1; README "NewFocus 8742 Picomotor").
 - **Images.** CI publishes on a git tag, CalVer `YYYY.M.N` (`2026.10.1`;
   never re-push a tag): `ghcr.io/geecs-bella/ioc-motion-runtime:<tag>` (what hosts
   pull, no credentials) and `-developer` (the release job runs in it; a build

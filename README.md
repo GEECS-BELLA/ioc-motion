@@ -1193,12 +1193,14 @@ LabVIEW driver's route through NewFocus's .NET library) has no asyn route on
 Linux: geecs-epics' `families/motion/nf874x_usb_shim.py` serves the bulk
 endpoints as TCP on the host's loopback, run as a sidecar on this image's
 `python3` (geecs-epics `services/undulator/motion/pmtest1`, U_BlueDiodePicos,
-read-only on hardware through it since 2026-10-30, tag 2026.10.3b1). The pin is master 0f86a5b rather than R1-3: upstream #19 (every axis
+read-only and writes on hardware through it on 2026-10-30 with tag
+2026.10.3b1; the later pre-releases have booted read-only there, b13, or run
+on the fake only, b14 to b16). The pin is master 0f86a5b rather than R1-3: upstream #19 (every axis
 `n>m` once a chain is configured; R1-3 sent bare numbers to the master's
 channels and a chain moved both controllers) and #17 (a sleep before each
 write-only command; back-to-back writes offset the replies from their
 commands). The first unit is GEECS-BELLA/geecs-epics
-`services/undulator/motion/pmtest1` (proven on its fake only).
+`services/undulator/motion/pmtest1` (U_BlueDiodePicos, two 8742s).
 The ibek entities (`ibek-support-geecs/motorNewFocus/motorNewFocus.ibek.support.yaml`):
 
 - `motorNewFocus.NF874xController` — the asyn IP port (`<name>_IP`, its
@@ -1255,8 +1257,8 @@ the database:
 | Variable | upstream | the other value |
 |---|---|---|
 | `nf874xSetLimits` | 1: `SR`/`SL` from the record's DHLM/DLLM at init and on change | 0: kept in the driver, nothing sent; the record enforces its own limits |
-| `nf874xHomeAllowed` | 1: HOMF/HOMR send `AC`, `VA`, `MT`/`MZ` | 0: refused with an error, nothing sent |
-| `nf874xJogAllowed` | 1: JOGF/JOGR send `AC`, `VA`, `MV +/-`, which runs until `ST` (no switch ends it on an open-loop Picomotor; a lost link leaves it running; the record's soft limit stops it only a poll later, about VELO x moving poll past it) | 0: refused with an error, nothing sent |
+| `nf874xHomeAllowed` | 1: HOMF/HOMR send `AC`, `VA`, `MT`/`MZ` | 0: refused, nothing sent; latched like a refused move, so the record shows MAJOR once done (2026.10.3b16) |
+| `nf874xJogAllowed` | 1: JOGF/JOGR send `AC`, `VA`, `MV +/-`, which runs until `ST` (no switch ends it on an open-loop Picomotor; a lost link leaves it running; the record's soft limit stops it only a poll later, about VELO x moving poll past it) | 0: refused, nothing sent; latched like a refused move, so the record shows MAJOR once done (2026.10.3b16) |
 | `nf874xCheckMoves` | 0: the error queue is never read; an ignored move ends silently | 1: `TE?` until 0 at creation on every controller of the chain (at most ten each), and `TE?` (with the axis's `n>` prefix on a chain) after every `PA`/`PR`/`MV`; a non-zero code fails the command, latches the axis's problem bit until a later motion command is accepted, and the rest of that controller's queue is read at once; and before every `PA`/`PR`/`MV` the axis's controller's queue is read to 0, a late channel code (an 8742's x08 arrives after the `TE?` that follows the move) charged to its own channel's axis (problem bit latched) rather than to the move about to be sent. Queries only |
 | `VE?` read | `strncpy` of 9 characters without a terminator, then a write through `strchr`'s result: a NULL dereference when the copy holds no space. The manual's reply (`8742 Version 1.9 11/01/12`) parses; the crash is an empty or failed read (no controller at the address, a timeout), when `inString_` may also hold nothing written yet | the buffer zeroed and the read's status checked; the model found anywhere in the reply (`8743-CL`, else `8742`), printed at start (fix, no switch) |
 | axis members on an 8742 | `lastDirection_`, `limitChecking_`, the limits and the cached position set only for an 8743-CL: `poll()` read `lastDirection_` before the first move and `home()` read `limitChecking_`, undefined behaviour (a garbage direction bit in MSTA), not a crash. `updateInterval_`, `deadband_` and `followingError_` stay uninitialized (unused on an 8742) | initialized for every model (fix, no switch) |
@@ -1272,13 +1274,14 @@ Two 8742s chained, firmware 3.04, on USB through geecs-epics' shim
 (geecs-epics `services/undulator/motion/pmtest1`, records of 2026-10-30):
 `VE?` answers `8742 Version 3.04 09/09/16` and parses; `1>n` and `2>n` are
 accepted for every poll; the read-only phase sent queries only. In the write
-phase `check_moves` did its job three ways: `1>2 VA 2000` was answered
-`210` (x10, MAXIMUM VELOCITY EXCEEDED; the `PA` that followed still ran, so
-the latched problem bit marked a move that happened at the controller's
-previous velocity), a channel with no motor answered `x08` to its first move
-(MOTOR NOT CONNECTED, nothing moved), and a second channel's move while the
-first ran was refused (x14) and alarmed; a stale slave error read at a later
-axis's first `TE?` did not flag it. The controller's motor types (QM) are
+phase (on 2026.10.3b1) `check_moves` did its job three ways: `1>2 VA 2000`
+was answered `210` (x10, MAXIMUM VELOCITY EXCEEDED; the `PA` that followed
+still ran, so the latched problem bit marked a move that happened at the
+controller's previous velocity), a channel with no motor answered `x08` to
+its first move (MOTOR NOT CONNECTED, nothing moved), and a second channel's
+move while the first ran was refused (x14) and alarmed. A stale slave code
+was read at the next axis's first `TE?` and flagged that axis (m6) until its
+own retry cleared it: the case b13 to b16 address (below). The controller's motor types (QM) are
 set by its auto-detection during each channel's first move: all eight read
 0 before, then 3 (Standard) or 2 (Tiny).
 
@@ -1293,23 +1296,36 @@ set by its auto-detection during each channel's first move: all eight read
   this way. Unproven here; with `check_moves` a refusal shows as the
   problem bit and MISS rather than a silent stop (geecs-epics' fake runs
   that case with `--integer-args`).
-- **`check_moves` judges the whole command line.** `TE?` follows the
-  `PA`, so a `VA` refused before an accepted `PA` (x10) also fails the move
-  that ran (U_BlueDiodePicos m2, 2026-10-30). In x14 the x is the channel
-  that is moving, not the one commanded (`1>114` when 1>2 was commanded
-  while 1>1 ran): any non-zero code fails the command, whichever its x.
-  An 8742 queues x08 (MOTOR NOT CONNECTED) late: on U_BlueDiodePicos the
-  `TE?` right after a move to an empty channel read 0, the record's retry
-  (RBV had not moved) read the first move's 108, and the retry's own 108 was
-  read by the next axis's first `TE?` (m6 flagged, then cleared by its own
-  retry). 2026.10.3b13 reads the rest of the queue after a non-zero code;
-  2026.10.3b14 also reads the queue before every motion command and charges
-  a late channel code to its own channel's axis, and 2026.10.3b15 keeps that
-  axis's latch through the command it was found before (b14's retry, taken
-  with `TE?` 0, cleared it: the fake showed the empty channel at NO_ALARM
-  until the next move on its controller). So an empty channel is caught by
-  RTRY (the count did not change) and alarms with its retry, and no other
-  axis is flagged for it.
+- **How `check_moves` charges a code** (2026.10.3b16). The queue is read to 0
+  before every motion command and after it, and each code goes to the axis it
+  belongs to: x14 read after a command to the commanded axis (its x names the
+  channel that was moving: `1>114` when 1>2 was commanded while 1>1 ran);
+  any other channel code (x01..x99) to channel x's axis on that controller,
+  wherever it is read (an 8742 queues x08, MOTOR NOT CONNECTED, late: the
+  `TE?` right after a move to an empty channel read 0 on U_BlueDiodePicos, the
+  record's retry read the first attempt's 108, and the retry's own 108 was
+  read at the next axis's first `TE?`); a general code (0-99) read after a
+  command to the commanded axis, before it logged only. A code read outside
+  its owner's own post-command `TE?` keeps the owner's latch through the
+  owner's next accepted command. The latch shows as the problem bit only once
+  the axis reads done (`poll`), so DMOV never goes to 1 while it moves; a
+  command clears the bit before it is sent. History: b13 read the rest of the
+  queue after a non-zero code, b14 read it before every move, b15 kept an
+  axis's own late code through its retry, b16 (the final review of #16)
+  charges every code by its channel, shows the latch only when done, and
+  latches a refused jog or home; b14 and b15 charged a code in the post-move
+  `TE?` to the commanded axis whatever its channel, and set a done-only rule
+  for neither. Proven on geecs-epics' fake (`sim/nf8742_sim.py`
+  `--late-after`, `--flaky`), not yet on the hardware.
+- **`check_moves` judges the whole command line.** `TE?` follows the `PA`, so
+  a `VA` refused before an accepted `PA` (x10 on its own channel) fails the
+  move that ran (U_BlueDiodePicos m2, 2026-10-30); the alarm now shows once
+  that move is done.
+- **A STOP waits behind a move's queue reads.** The port thread serves
+  `move()` before a queued STOP: typically two `TE?` round trips more than
+  upstream, at most ten before and ten after; on a stalled link each failing
+  read costs the controller timeout, so a STOP can arrive seconds later (a
+  stalled link would not carry it anyway).
 - **No limits, no home, no motor check.** The 8742 has no limit inputs;
   MSTA's home bit is the driver's "position is 0". `MC` (motor check: one
   step each way on every channel) and `QM` are never sent.

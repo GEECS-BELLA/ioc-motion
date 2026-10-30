@@ -186,8 +186,9 @@ entity_models:
           Retries: the record compares TP? with VAL after a move and resends
           the (absolute) PA when they differ by more than one step; an 8742
           ignores a move while another motor of that controller runs, so 1
-          retries once, then MISS. 0 ends a dropped move silently unless
-          check_moves is on.
+          retries once, then MISS. With 0 a refused move alarms (check_moves)
+          but an empty channel's x08, which arrives late, alarms only at the
+          next motion command on that controller: there is no retry to read it.
         default: 1
       DLY:
         type: float
