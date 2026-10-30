@@ -344,8 +344,17 @@ defaulting to upstream behaviour (`variable()` lines in `devNewport.dbd`):
 default to false; they are global to the IOC. Outside the switches, two
 fixes: `PH2` sets axis 2's limit (upstream tested `PH3` twice), and the
 reverse amplitude's default is applied to the reverse amplitude. `MR` stays:
-nothing but `VE`, `TS` and `TE` answers without it. The channel check is
-worth proposing upstream as it stands; the init writes as an option.
+nothing but `VE`, `TS` and `TE` answers without it. The channel check and the
+per-axis count are worth proposing upstream as they stand; the init writes as
+an option.
+
+On the first unit (geecs-epics `agtest1`, 2026-10-29, tag 2026.10.3b7): a
+boot sends `MR` and `VE`, then the poll's `CC1`/`CC2` and queries only; all
+four configured axes moved ±10 and ±50 steps through the record and back,
+each reading its own count; the poll's `CC` was refused (`TE-6`) while a pair
+stepped and the poll skipped as above. 2026.10.3b3 read `TP` as upstream
+does (the per-slot finding); b4 and b5 lost steps between a pair's last poll
+and the `CC` (the fake) and are superseded.
 
 ### Known gaps (R1-3, with the patch), from reading it
 
