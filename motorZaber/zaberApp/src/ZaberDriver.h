@@ -43,7 +43,15 @@
 #define ZaberLimitMaxString   "ZABER_LIMIT_MAX"
 #define ZaberResolutionString "ZABER_RESOLUTION"
 #define ZaberClearWarningsString "ZABER_CLEAR_WARNINGS"
-#define NUM_ZABER_PARAMS 11
+#define ZaberStopFailedString "ZABER_STOP_FAILED"
+#define NUM_ZABER_PARAMS 12
+
+/* The identity reads after get version, each retried until the device answers it (OK or RJ) */
+enum { ZABER_ID_DEVICEID = 1, ZABER_ID_SERIAL = 2, ZABER_ID_PERIPHERAL = 4, ZABER_ID_RESOLUTION = 8,
+       ZABER_ID_MAXSPEED = 16, ZABER_ID_LIMIT_MIN = 32, ZABER_ID_LIMIT_MAX = 64, ZABER_ID_ALL = 127 };
+
+/* Which limit a latched WL stands for, taken on the poll it appeared */
+enum { ZABER_WL_NONE = 0, ZABER_WL_HIGH = 1, ZABER_WL_LOW = 2, ZABER_WL_UNKNOWN = 3 };
 
 /** One reply line, parsed: "@01 1 07 OK IDLE -- 12345" (07: the message id) */
 struct ZaberReply {
@@ -86,7 +94,12 @@ private:
   int allowClear_;        /**< 1: the clear_warnings record sends "warnings clear"; 0: refused */
   int powerPolicy_;       /**< ZaberPowerPolicy */
   double powerOffDelay_;  /**< s after a move ends before "driver disable" (on_for_move) */
-  int identified_;        /**< The identity and settings were read (get version answered) */
+  int identified_;        /**< get version answered and every identity read in idDone_ */
+  int idDone_;            /**< ZABER_ID_* bits: the identity reads the device has answered */
+  int haveDir_;           /**< A move or home of ours has run since the IOC started */
+  int wlSide_;            /**< ZABER_WL_*: the side a latched WL was taken for, on the poll it appeared */
+  int flagsComplete_;     /**< The flag list is the device's full one (warnings answered, or the top flag was --) */
+  int stopFailed_;        /**< The last stop got no reply or a rejection: an alarm until a stop or move is acknowledged */
   int firmware_;          /**< major * 100 + minor, 0 = unknown */
   int moving_;            /**< A move or home of ours is running */
   int busy_;              /**< The last reply said BUSY */
@@ -105,7 +118,9 @@ private:
   asynStatus cmd(const char *command, ZaberReply *r);
   asynStatus deviceCmd(const char *command, ZaberReply *r);
   void identify();
+  int idRead(int bit, ZaberReply *r, const char *command, const char *alternative, int deviceScope);
   void takeFlags(const ZaberReply &r);
+  void setStopFailed(int failed);
   int hasFlag(const char *flag) const;
   int isFault(const char *flag) const;
   asynStatus driverEnable();
@@ -136,6 +151,7 @@ protected:
   int ZaberLimitMax_;
   int ZaberResolution_;
   int ZaberClearWarnings_;
+  int ZaberStopFailed_;
 
 private:
   int nextId_;            /**< The next message id, 0..99 */

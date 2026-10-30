@@ -76,6 +76,7 @@ ZaberController::ZaberController(const char *portName, const char *serialPortNam
   createParam(ZaberLimitMaxString, asynParamFloat64, &ZaberLimitMax_);
   createParam(ZaberResolutionString, asynParamInt32, &ZaberResolution_);
   createParam(ZaberClearWarningsString, asynParamInt32, &ZaberClearWarnings_);
+  createParam(ZaberStopFailedString, asynParamInt32, &ZaberStopFailed_);
 
   if (pasynOctetSyncIO->connect(serialPortName, 0, &pasynUserController_, NULL)) {
     asynPrint(pasynUserSelf, ASYN_TRACE_ERROR, "%s: cannot connect to serial port %s\n",
@@ -103,15 +104,20 @@ ZaberAxis* ZaberController::getAxis(int axisNo)
 }
 
 /** The one command beyond the motor record: a put to the axis's
-  * clear_warnings record sends "warnings clear" (only with allow_clear_warnings). */
+  * clear_warnings record sends "warnings clear" (only with allow_clear_warnings).
+  * The record is a momentary button: whatever happened (sent, refused, no
+  * reply; the IOC log says which, and the axis's :warnings shows the result),
+  * its parameter returns to 0 and the record reads that back (asyn:READBACK),
+  * so a refused put leaves no standing WRITE alarm. */
 asynStatus ZaberController::writeInt32(asynUser *pasynUser, epicsInt32 value)
 {
   if (pasynUser->reason == ZaberClearWarnings_) {
     ZaberAxis *pAxis = getAxis(pasynUser);
     if (!pAxis) return asynError;
+    if (value) pAxis->clearWarnings();
     setIntegerParam(pAxis->axisNo_, ZaberClearWarnings_, 0);
-    if (!value) return asynSuccess;
-    return pAxis->clearWarnings();
+    callParamCallbacks(pAxis->axisNo_);
+    return asynSuccess;
   }
   return asynMotorController::writeInt32(pasynUser, value);
 }
@@ -223,6 +229,7 @@ ZaberAxis::ZaberAxis(ZaberController *pC, int axisNo)
   : asynMotorAxis(pC, axisNo),
     pC_(pC), device_(0), axis_(1), speedArgs_(0), allowHome_(0), allowUnreferenced_(0), allowClear_(0),
     powerPolicy_(ZABER_POWER_LEAVE), powerOffDelay_(0.0), identified_(0), firmware_(0), moving_(0), busy_(0),
+    idDone_(0), haveDir_(0), wlSide_(ZABER_WL_NONE), flagsComplete_(1), stopFailed_(0),
     homed_(0), failures_(0), backoff_(0), driverOn_(1), weDisabled_(0), lastDirPositive_(1), offPending_(0),
     lastPos_(0), nflags_(0)
 {
@@ -236,6 +243,7 @@ ZaberAxis::ZaberAxis(ZaberController *pC, int axisNo)
   pC_->setIntegerParam(axisNo_, pC_->ZaberSerial_, 0);
   pC_->setIntegerParam(axisNo_, pC_->ZaberResolution_, 0);
   pC_->setIntegerParam(axisNo_, pC_->ZaberClearWarnings_, 0);
+  pC_->setIntegerParam(axisNo_, pC_->ZaberStopFailed_, 0);
   pC_->setDoubleParam(axisNo_, pC_->ZaberMaxspeed_, 0.0);
   pC_->setDoubleParam(axisNo_, pC_->ZaberLimitMin_, 0.0);
   pC_->setDoubleParam(axisNo_, pC_->ZaberLimitMax_, 0.0);
@@ -279,52 +287,69 @@ asynStatus ZaberAxis::deviceCmd(const char *command, ZaberReply *r)
   return pC_->exchange(device_, 0, command, r);
 }
 
+/** One identity read: done (its bit set in idDone_) once the device has
+  * answered it, OK or RJ: a rejected setting (older firmware lacks some) is an
+  * answer, read as absent; a timeout is not, and is asked again next poll.
+  * With an alternative name, a rejection of the first is followed by the
+  * second. Returns 1 with r holding an OK reply, 0 otherwise. */
+int ZaberAxis::idRead(int bit, ZaberReply *r, const char *command, const char *alternative, int deviceScope)
+{
+  if (idDone_ & bit) return 0;
+  asynStatus s = deviceScope ? deviceCmd(command, r) : cmd(command, r);
+  if (s == asynSuccess && !r->ok && alternative) s = deviceScope ? deviceCmd(alternative, r) : cmd(alternative, r);
+  if (s != asynSuccess) return 0;
+  idDone_ |= bit;
+  return r->ok;
+}
+
 /** The identity and the settings the record's configuration is checked
-  * against: all "get". Retried on later polls until get version answers
-  * (a stage off or mis-addressed at boot is identified when it answers). */
+  * against: all "get". get version first, retried on later polls until it
+  * answers (a stage off or mis-addressed at boot is identified when it
+  * answers); then each other read, each retried until answered, so one
+  * dropped reply at boot does not leave its record at 0 for the IOC's life.
+  * A genuine 0 (limit.min, a serial an X-MCC axis lacks) is an answer. */
 void ZaberAxis::identify()
 {
   ZaberReply r;
-  if (deviceCmd("get version", &r) != asynSuccess || !r.ok) {
-    pC_->setStringParam(axisNo_, pC_->ZaberVersion_, "no reply");
-    return;
+  if (!firmware_) {
+    if (deviceCmd("get version", &r) != asynSuccess || !r.ok) {
+      pC_->setStringParam(axisNo_, pC_->ZaberVersion_, "no reply");
+      return;
+    }
+    int major = 0, minor = 0;
+    if (sscanf(r.data, "%d.%d", &major, &minor) != 2 || major * 100 + minor <= 0) {
+      pC_->setStringParam(axisNo_, pC_->ZaberVersion_, r.data);
+      return;
+    }
+    firmware_ = major * 100 + minor;
+    pC_->setStringParam(axisNo_, pC_->ZaberVersion_, r.data);
   }
-  int major = 0, minor = 0;
-  if (sscanf(r.data, "%d.%d", &major, &minor) == 2) firmware_ = major * 100 + minor;
-  pC_->setStringParam(axisNo_, pC_->ZaberVersion_, r.data);
-  if ((deviceCmd("get deviceid", &r) == asynSuccess && r.ok) ||
-      (deviceCmd("get device.id", &r) == asynSuccess && r.ok)) {
+  if (idRead(ZABER_ID_DEVICEID, &r, "get deviceid", "get device.id", 1))
     pC_->setIntegerParam(axisNo_, pC_->ZaberDeviceId_, atoi(r.data));
-  }
-  if (deviceCmd("get system.serial", &r) == asynSuccess && r.ok) {
+  if (idRead(ZABER_ID_SERIAL, &r, "get system.serial", NULL, 1))
     pC_->setIntegerParam(axisNo_, pC_->ZaberSerial_, atoi(r.data));
-  }
-  if ((cmd("get peripheralid", &r) == asynSuccess && r.ok) ||
-      (cmd("get peripheral.id", &r) == asynSuccess && r.ok)) {
+  if (idRead(ZABER_ID_PERIPHERAL, &r, "get peripheralid", "get peripheral.id", 0))
     pC_->setIntegerParam(axisNo_, pC_->ZaberPeripheralId_, atoi(r.data));
-  }
-  if (cmd("get resolution", &r) == asynSuccess && r.ok) {
+  if (idRead(ZABER_ID_RESOLUTION, &r, "get resolution", NULL, 0))
     pC_->setIntegerParam(axisNo_, pC_->ZaberResolution_, atoi(r.data));
-  }
-  if (cmd("get maxspeed", &r) == asynSuccess && r.ok) {
+  if (idRead(ZABER_ID_MAXSPEED, &r, "get maxspeed", NULL, 0))
     pC_->setDoubleParam(axisNo_, pC_->ZaberMaxspeed_, strtod(r.data, NULL));
-  }
-  if (cmd("get limit.min", &r) == asynSuccess && r.ok) {
+  if (idRead(ZABER_ID_LIMIT_MIN, &r, "get limit.min", NULL, 0))
     pC_->setDoubleParam(axisNo_, pC_->ZaberLimitMin_, strtod(r.data, NULL));
-  }
-  if (cmd("get limit.max", &r) == asynSuccess && r.ok) {
+  if (idRead(ZABER_ID_LIMIT_MAX, &r, "get limit.max", NULL, 0))
     pC_->setDoubleParam(axisNo_, pC_->ZaberLimitMax_, strtod(r.data, NULL));
-  }
-  identified_ = 1;
+  identified_ = (idDone_ == ZABER_ID_ALL);
 }
 
-/** The flags of a fresh reply: the top flag alone when it is "--", else the
-  * full list ("warnings": "<count> <flag> <flag> ..."), the top flag alone
-  * if that query fails. */
+/** The flags of a fresh reply: none when the top flag is "--", else the full
+  * list ("warnings": "<count> <flag> <flag> ..."). If that query fails only
+  * the top flag is known and flagsComplete_ is 0: a lower flag (WR under a
+  * fault or a W flag that outranks it) may be hidden, and a move is refused. */
 void ZaberAxis::takeFlags(const ZaberReply &top)
 {
   ZaberReply r;
   nflags_ = 0;
+  flagsComplete_ = 1;
   pC_->setStringParam(axisNo_, pC_->ZaberFlag_, top.flag);
   if (strcmp(top.flag, "--") == 0) return;
   if (cmd("warnings", &r) == asynSuccess && r.ok) {
@@ -332,8 +357,21 @@ void ZaberAxis::takeFlags(const ZaberReply &top)
     while (tok && (tok = strtok_r(NULL, " ", &save)) != NULL && nflags_ < ZABER_MAX_FLAGS) {
       if (strlen(tok) == 2) { strcpy(flags_[nflags_], tok); nflags_++; }
     }
+  } else {
+    flagsComplete_ = 0;
   }
   if (nflags_ == 0) { strcpy(flags_[0], top.flag); nflags_ = 1; }
+}
+
+/** stop_failed: a stop that got no reply or a rejection is an alarm on the
+  * axis (the record's :stop_failed, MAJOR) until a stop or move is
+  * acknowledged, or a fresh reply says the axis is IDLE. No automatic resend:
+  * a second stop while decelerating is the device's instant stop. */
+void ZaberAxis::setStopFailed(int failed)
+{
+  if (stopFailed_ == failed) return;
+  stopFailed_ = failed;
+  pC_->setIntegerParam(axisNo_, pC_->ZaberStopFailed_, failed);
 }
 
 int ZaberAxis::hasFlag(const char *flag) const
@@ -434,6 +472,12 @@ asynStatus ZaberAxis::move(double position, int relative, double minVelocity, do
               driverName, functionName, device_, axis_);
     return asynError;
   }
+  if (!flagsComplete_ && !allowUnreferenced_) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+              "%s:%s: device %d axis %d: flag %s up and the warnings query failed (a WR may be hidden): move refused\n",
+              driverName, functionName, device_, axis_, r.flag);
+    return asynError;
+  }
   if (hasFlag("WR") && !allowUnreferenced_) {
     asynPrint(pasynUser_, ASYN_TRACE_ERROR,
               "%s:%s: device %d axis %d: no reference position (WR): move refused (home it, or allow_unreferenced)\n",
@@ -461,6 +505,8 @@ asynStatus ZaberAxis::move(double position, int relative, double minVelocity, do
   }
   moving_ = 1;
   busy_ = 1;
+  haveDir_ = 1;
+  setStopFailed(0);
   lastDirPositive_ = target >= lastPos_ ? 1 : 0;
   setIntegerParam(pC_->motorStatusDirection_, lastDirPositive_);
   setIntegerParam(pC_->motorStatusDone_, 0);
@@ -503,6 +549,8 @@ asynStatus ZaberAxis::home(double minVelocity, double maxVelocity, double accele
   }
   moving_ = 1;
   busy_ = 1;
+  haveDir_ = 1;
+  setStopFailed(0);
   lastDirPositive_ = 0;                  /* toward the motor end */
   setIntegerParam(pC_->motorStatusDone_, 0);
   setIntegerParam(pC_->motorStatusMoving_, 1);
@@ -523,20 +571,22 @@ asynStatus ZaberAxis::stop(double acceleration)
   if (cmd("get pos", &r) == asynSuccess && r.ok && !r.busy) {
     asynPrint(pasynUser_, ASYN_TRACE_FLOW, "%s:stop: device %d axis %d: IDLE; nothing sent\n",
               driverName, device_, axis_);
+    setStopFailed(0);
+    callParamCallbacks();
     return asynSuccess;
   }
   asynStatus status = cmd("stop", &r);
-  if (status) {
-    asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:stop: device %d axis %d: stop sent, no reply (status %d)\n",
-              driverName, device_, axis_, (int)status);
-    return status;
-  }
-  if (!r.ok) {
+  if (status == asynSuccess && !r.ok) {
     asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:stop: device %d axis %d: rejected (%s)\n",
               driverName, device_, axis_, r.data);
-    return asynError;
+    status = asynError;
+  } else if (status) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:stop: device %d axis %d: stop sent, no reply (status %d)\n",
+              driverName, device_, axis_, (int)status);
   }
-  return asynSuccess;
+  setStopFailed(status != asynSuccess);
+  callParamCallbacks();
+  return status;
 }
 
 /** "set pos" would redefine the device's reference: refused, nothing sent. */
@@ -592,12 +642,21 @@ asynStatus ZaberAxis::poll(bool *moving)
     pC_->setStringParam(axisNo_, pC_->ZaberWarnings_, text);
     homed_ = !(hasFlag("WR") || hasFlag("WH"));
     driverOn_ = !(hasFlag("FO") || hasFlag("FD"));
-    /* WL: a limit sensor interrupted a move. The device has no limit-switch
-     * bits of its own; the record sees a limit on the side of our last move,
-     * so it ends a move in that direction instead of reporting it complete. */
-    int wl = hasFlag("WL");
-    setIntegerParam(pC_->motorStatusHighLimit_, wl && lastDirPositive_);
-    setIntegerParam(pC_->motorStatusLowLimit_, wl && !lastDirPositive_);
+    /* WL: a limit sensor interrupted a move; it latches until warnings clear.
+     * Its side is taken once, on the poll where WL first appears, from the
+     * move or home of ours that was running then, and held until WL clears:
+     * later moves do not move it. A WL with no move of ours behind it (left
+     * from before this IOC started) has no known side: PROBLEM, not a guessed
+     * limit, until it clears. */
+    if (!hasFlag("WL")) {
+      wlSide_ = ZABER_WL_NONE;
+    } else if (wlSide_ == ZABER_WL_NONE) {
+      wlSide_ = !haveDir_ ? ZABER_WL_UNKNOWN : (lastDirPositive_ ? ZABER_WL_HIGH : ZABER_WL_LOW);
+    }
+    setIntegerParam(pC_->motorStatusHighLimit_, wlSide_ == ZABER_WL_HIGH);
+    setIntegerParam(pC_->motorStatusLowLimit_, wlSide_ == ZABER_WL_LOW);
+    if (wlSide_ == ZABER_WL_UNKNOWN) problem = 1;
+    if (!busy_) setStopFailed(0);        /* at rest: the stop question is settled */
     if (moving_ && !busy_) {
       moving_ = 0;
       if (powerPolicy_ == ZABER_POWER_ON_FOR_MOVE) scheduleOff(powerOffDelay_);
