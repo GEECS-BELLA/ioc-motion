@@ -50,10 +50,10 @@ index 0000000..acb5e82
 +	field(DISP, "$(DISP=0)")
 +}
 diff --git a/newportApp/src/AG_UC.cpp b/newportApp/src/AG_UC.cpp
-index dc0796f..4268275 100644
+index dc0796f..2ae7813 100644
 --- a/newportApp/src/AG_UC.cpp
 +++ b/newportApp/src/AG_UC.cpp
-@@ -29,6 +29,32 @@ April 11, 2013
+@@ -29,6 +29,34 @@ April 11, 2013
  #define AGILIS_TIMEOUT 2.0
  #define WRITE_DELAY 0.01
  
@@ -75,9 +75,11 @@ index dc0796f..4268275 100644
 + *   the AG-UC8's step counter belongs to the axis slot (1 or 2), not to the
 + *   pair: after CC2, 1TP reports the count pair 1's axis 1 left (the first
 + *   unit, 2026-10-29), so upstream reads every pair's axis n as one position.
-+ *   With 0, an accepted CC is followed by 1TP and 2TP, the slots' counts at
-+ *   selection, and each axis's position is its own count (0 at IOC start)
-+ *   plus the slot's steps since its pair was selected. */
++ *   With 0, each axis keeps its own count (0 at IOC start): every change of a
++ *   slot's TP is credited to the selected pair's axis in that slot, and before
++ *   a CC both slots are read, so steps taken since the last poll are credited
++ *   before the pair changes; after an accepted CC both are read again as the
++ *   new pair's references. */
 +volatile int AG_UCInitWrites = 1;
 +extern "C" {epicsExportAddress(int, AG_UCInitWrites);}
 +volatile int AG_UCChannelUpstream = 1;
@@ -86,16 +88,17 @@ index dc0796f..4268275 100644
  /** Creates a new AG_UCController object.
    * \param[in] portName          The name of the asyn port that will be created for this driver
    * \param[in] serialPortName    The name of the drvAsynSerialPort that was created previously to connect to the Agilis controller 
-@@ -48,6 +74,8 @@ AG_UCController::AG_UCController(const char *portName, const char *serialPortNam
+@@ -48,6 +76,9 @@ AG_UCController::AG_UCController(const char *portName, const char *serialPortNam
    asynStatus status;
    static const char *functionName = "AG_UCController::AG_UCController";
  
 +  currentChannel_ = 0;
++  slotRaw_[0] = slotRaw_[1] = slotRaw_[2] = 0;
 +
    /* Connect to Agilis controller */
    status = pasynOctetSyncIO->connect(serialPortName, 0, &pasynUserController_, NULL);
    if (status) {
-@@ -56,11 +84,13 @@ AG_UCController::AG_UCController(const char *portName, const char *serialPortNam
+@@ -56,11 +87,13 @@ AG_UCController::AG_UCController(const char *portName, const char *serialPortNam
        functionName);
    }
    
@@ -114,7 +117,7 @@ index dc0796f..4268275 100644
  
    // Put the controller in remote mode
    sprintf(outString_, "MR");
-@@ -158,8 +188,16 @@ asynStatus AG_UCController::writeAgilis(int channelID, const char *output, doubl
+@@ -158,8 +191,16 @@ asynStatus AG_UCController::writeAgilis(int channelID, const char *output, doubl
    // const char *functionName="writeAgilis";
    
    // If channelID is non-zero then we need to send the CC command first
@@ -133,7 +136,42 @@ index dc0796f..4268275 100644
  
    status = pasynOctetSyncIO->write(pasynUserController_, output,
                                     strlen(output), timeout, &nwrite);
-@@ -173,13 +211,62 @@ asynStatus AG_UCController::writeAgilis(int channelID, const char *output, doubl
+@@ -170,16 +211,105 @@ asynStatus AG_UCController::writeAgilis(int channelID, const char *output, doubl
+   return status ;
+ }
+ 
++/** ioc-motion: read slot <slot>'s step counter (<slot>TP) into *raw. */
++asynStatus AG_UCController::readSlot(int slot, int *raw)
++{
++  char cmd[8];
++  char reply[40];
++  size_t nread;
++  asynStatus status;
++
++  sprintf(cmd, "%dTP", slot);
++  status = writeReadController(cmd, reply, sizeof(reply), &nread, AGILIS_TIMEOUT);
++  epicsThreadSleep(WRITE_DELAY);
++  if (status) return status;
++  if (reply[0] != '0' + slot || strncmp(&reply[1], "TP", 2) != 0) {
++    asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
++      "AG_UCController::readSlot: %s, unexpected reply \"%s\"\n", cmd, reply);
++    return asynError;
++  }
++  *raw = atoi(&reply[3]);
++  return asynSuccess;
++}
++
++/** ioc-motion: credit a change of slot <slot>'s counter to the selected
++  * pair's axis in that slot, and keep raw as the slot's reference. */
++void AG_UCController::account(int slot, int raw)
++{
++  if (currentChannel_ != 0) {
++    AG_UCAxis *pAxis = getAxis((currentChannel_ - 1) * 2 + slot - 1);
++    if (pAxis) pAxis->pairPosition_ += raw - slotRaw_[slot];
++  }
++  slotRaw_[slot] = raw;
++}
++
  asynStatus AG_UCController::setChannel(int channelID)
  {
    char tempString[40];
@@ -148,6 +186,18 @@ index dc0796f..4268275 100644
 +  if (!AG_UCChannelUpstream) {
 +    if (channelID == 0) return asynSuccess;
 +    if (channelID == currentChannel_) return asynSuccess;
++    // credit the outgoing pair with what its slots counted since its last poll
++    if (currentChannel_ != 0) {
++      for (int slot = 1; slot <= 2; slot++) {
++        int raw;
++        status = readSlot(slot, &raw);
++        if (status) {
++          currentChannel_ = 0;
++          return status;
++        }
++        account(slot, raw);
++      }
++    }
 +  }
    sprintf(tempString, "CC%d", channelID);
    status = writeController(tempString, AGILIS_TIMEOUT);
@@ -173,21 +223,17 @@ index dc0796f..4268275 100644
 +  }
 +  code = atoi(&reply[2]);
 +  if (code == 0) {
-+    // The slots' counts at selection: the reference for this pair's axes
-+    for (int slot = 1; slot <= 2; slot++) {
-+      AG_UCAxis *pAxis = getAxis((channelID - 1) * 2 + slot - 1);
-+      sprintf(tempString, "%dTP", slot);
-+      status = writeReadController(tempString, reply, sizeof(reply), &nread, AGILIS_TIMEOUT);
-+      epicsThreadSleep(WRITE_DELAY);
-+      if (status || strncmp(&reply[1], "TP", 2) != 0) {
-+        asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
-+          "AG_UCController::setChannel: CC%d, %s reply \"%s\"\n", channelID, tempString, reply);
-+        currentChannel_ = 0;
-+        return status ? status : asynError;
-+      }
-+      if (pAxis) pAxis->rawRef_ = atoi(&reply[3]);
-+    }
 +    currentChannel_ = channelID;
++    // the new pair's references (the counters carry over a CC unchanged)
++    for (int slot = 1; slot <= 2; slot++) {
++      int raw;
++      status = readSlot(slot, &raw);
++      if (status) {
++        currentChannel_ = 0;
++        return status;
++      }
++      slotRaw_[slot] = raw;
++    }
 +    return asynSuccess;
 +  }
 +  // -6: an axis of the selected pair moves, so the selection is unchanged
@@ -198,16 +244,16 @@ index dc0796f..4268275 100644
  }
  
  /** Reports on status of the driver
-@@ -230,7 +317,7 @@ AG_UCAxis::AG_UCAxis(AG_UCController *pC, int axisNo, bool hasLimits,
+@@ -230,7 +360,7 @@ AG_UCAxis::AG_UCAxis(AG_UCController *pC, int axisNo, bool hasLimits,
    : asynMotorAxis(pC, axisNo),
      pC_(pC), hasLimits_(hasLimits), 
      forwardAmplitude_(forwardAmplitude), reverseAmplitude_(reverseAmplitude),
 -    currentPosition_(0), positionOffset_(0)
-+    currentPosition_(0), positionOffset_(0), pairPosition_(0), rawRef_(0)
++    currentPosition_(0), positionOffset_(0), pairPosition_(0)
  {
    axisID_ = (axisNo % 2) + 1;  // Either 1 or 2
    if (pC_->AG_UCModel_ == ModelAG_UC2) {
-@@ -239,11 +326,15 @@ AG_UCAxis::AG_UCAxis(AG_UCController *pC, int axisNo, bool hasLimits,
+@@ -239,11 +369,15 @@ AG_UCAxis::AG_UCAxis(AG_UCController *pC, int axisNo, bool hasLimits,
      channelID_ = axisNo/2 + 1;
    }
    if (forwardAmplitude_ <= 0) forwardAmplitude_ = 50;
@@ -228,7 +274,7 @@ index dc0796f..4268275 100644
  }
  
  /** Reports on status of the axis
-@@ -280,6 +371,11 @@ asynStatus AG_UCAxis::move(double position, int relative, double minVelocity, do
+@@ -280,6 +414,11 @@ asynStatus AG_UCAxis::move(double position, int relative, double minVelocity, do
      sprintf(pC_->outString_, "%dPR%d", axisID_, steps);
    }
    status = writeAgilis();
@@ -240,7 +286,7 @@ index dc0796f..4268275 100644
    return status;
  }
  
-@@ -320,6 +416,10 @@ asynStatus AG_UCAxis::stop(double acceleration )
+@@ -320,6 +459,10 @@ asynStatus AG_UCAxis::stop(double acceleration )
    asynStatus status;
    //static const char *functionName = "AG_UCAxis::stop";
  
@@ -251,7 +297,7 @@ index dc0796f..4268275 100644
    sprintf(pC_->outString_, "%dST", axisID_);
    status = writeAgilis();
    return status;
-@@ -347,8 +447,17 @@ asynStatus AG_UCAxis::poll(bool *moving)
+@@ -347,8 +490,17 @@ asynStatus AG_UCAxis::poll(bool *moving)
    asynStatus comStatus;
  
    //  Select this channel
@@ -271,20 +317,19 @@ index dc0796f..4268275 100644
    // Read the current motor position
    sprintf(pC_->outString_, "%dTP", axisID_);
    comStatus = pC_->writeReadController();
-@@ -357,6 +466,12 @@ asynStatus AG_UCAxis::poll(bool *moving)
+@@ -357,6 +509,11 @@ asynStatus AG_UCAxis::poll(bool *moving)
    epicsThreadSleep(WRITE_DELAY);  
    // The response string is of the form "1TPxxx"
    position = atoi(&pC_->inString_[3]);
 +  // ioc-motion: this axis's own count, not the slot's (AG_UCChannelUpstream)
 +  if (!AG_UCChannelUpstream && channelID_ != 0) {
-+    pairPosition_ += position - rawRef_;
-+    rawRef_ = position;
++    pC_->account(axisID_, position);
 +    position = pairPosition_;
 +  }
    currentPosition_ = position + positionOffset_;
    setDoubleParam(pC_->motorPosition_, double(currentPosition_));
  
-@@ -380,7 +495,8 @@ asynStatus AG_UCAxis::poll(bool *moving)
+@@ -380,7 +537,8 @@ asynStatus AG_UCAxis::poll(bool *moving)
    // The response string is of the form "PHn"
    lim = atoi(&pC_->inString_[2]);
    if ((axisID_ == 1) && (lim == 1 || lim == 3)) limit = 1;
@@ -295,23 +340,32 @@ index dc0796f..4268275 100644
    setIntegerParam(pC_->motorStatusHighLimit_, limit);
  
 diff --git a/newportApp/src/AG_UC.h b/newportApp/src/AG_UC.h
-index 2858cb4..260ef15 100644
+index 2858cb4..87ee40d 100644
 --- a/newportApp/src/AG_UC.h
 +++ b/newportApp/src/AG_UC.h
-@@ -43,6 +43,8 @@ private:
+@@ -43,6 +43,7 @@ private:
    int reverseAmplitude_;
    int currentPosition_;
    int positionOffset_;
-+  int pairPosition_;   // ioc-motion: this axis's own count (the controller's TP is per axis slot, shared by the pairs)
-+  int rawRef_;         // ioc-motion: the slot's TP when this axis's pair was last selected
++  int pairPosition_;   // ioc-motion: this axis's own count (the controller's TP is per slot, shared by the pairs)
    int axisID_;
    int channelID_;
    
-@@ -65,4 +67,5 @@ public:
+@@ -57,6 +58,8 @@ public:
+   AG_UCAxis* getAxis(asynUser *pasynUser);
+   AG_UCAxis* getAxis(int axisNo);
+   asynStatus setChannel(int channelID);
++  asynStatus readSlot(int slot, int *raw);
++  void account(int slot, int raw);
+   asynStatus writeAgilis(int channelID);
+   asynStatus writeAgilis(int channelID, const char *output, double timeout);
+ 
+@@ -65,4 +68,6 @@ public:
  private:
    char controllerVersion_[40];
    AG_UCModel_t AG_UCModel_;
 +  int currentChannel_;   // ioc-motion: the pair the controller has selected, 0 = unknown
++  int slotRaw_[3];       // ioc-motion: the last TP read of slot 1 and 2 (index 0 unused)
  };
 diff --git a/newportApp/src/SMC100Driver.cpp b/newportApp/src/SMC100Driver.cpp
 index 05e9ef0..6d4c7e3 100644

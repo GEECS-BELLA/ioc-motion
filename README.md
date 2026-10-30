@@ -338,7 +338,7 @@ defaulting to upstream behaviour (`variable()` lines in `devNewport.dbd`):
 | Variable | 1 (upstream) | 0 |
 |---|---|---|
 | `AG_UCInitWrites` | `RS` at creation, `SU` forward and reverse per axis | neither: creation sends `MR` and `VE` only |
-| `AG_UCChannelUpstream` | `CC` before every command and every axis poll, result ignored; position = `TP` | `CC` only when the pair changes, then `TE`; refused (-6), that axis's poll is skipped (done, its last position kept), its move, jog or home is not sent (an error, the problem bit until its next poll), and its stop sends nothing (only the selected pair can move). Accepted, `1TP` and `2TP` are read as the slots' references, and each axis's position is its own count (0 at IOC start) plus its slot's steps since its pair was selected |
+| `AG_UCChannelUpstream` | `CC` before every command and every axis poll, result ignored; position = `TP` | `CC` only when the pair changes, then `TE`; refused (-6), that axis's poll is skipped (done, its last position kept), its move, jog or home is not sent (an error, the problem bit until its next poll), and its stop sends nothing (only the selected pair can move). Each axis keeps its own count (0 at IOC start): every change of a slot's `TP` is credited to the selected pair's axis in that slot; before a `CC` both slots are read (`1TP`, `2TP`) so steps since the last poll go to the outgoing pair, and after an accepted one both again as the new pair's references |
 
 `AG_UCController`'s `init_writes` and `channel_upstream` render them and
 default to false; they are global to the IOC. Outside the switches, two
