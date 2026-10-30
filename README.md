@@ -817,8 +817,8 @@ The ibek entities (`ibek-support-geecs/motorZaber/motorZaber.ibek.support.yaml`)
   A motor record on `ZaberMotor.db` (RSTM Never, DISP on by default) and the
   axis's readings on `ZaberAxis.db` as `$(P)$(M):flag`, `:warnings`,
   `:version`, `:device_id`, `:peripheral_id`, `:serial`, `:resolution`,
-  `:maxspeed`, `:limit_min`, `:limit_max`, plus one command record,
-  `:clear_warnings`. Switches, all off by default: `speed_args`,
+  `:maxspeed`, `:limit_min`, `:limit_max`, `:stop_failed`, plus one command
+  record, `:clear_warnings`. Switches, all off by default: `speed_args`,
   `allow_home`, `allow_unreferenced`, `allow_clear_warnings`, `power_policy`.
 
 **What goes down the line.** Every command is
@@ -831,9 +831,11 @@ manual's LRC, present when the device's `comm.checksum` is 1) does not
 verify is dropped. After an axis's first answered `get pos`: `get version`,
 `get deviceid` (then `device.id`) and `get system.serial` on axis 0, and
 `get peripheralid` (then `peripheral.id`), `get resolution`, `get maxspeed`,
-`get limit.min`, `get limit.max` on the axis, all retried on later polls
-until `get version` answers (a stage off or slow at boot is identified when
-it answers). `ZaberAxisConfig` runs one poll before iocInit, so the record
+`get limit.min`, `get limit.max` on the axis: `get version` retried on
+later polls until it answers (a stage off or slow at boot is identified
+when it answers), then each other read retried until the device answers
+it, OK or RJ (a rejection is an answer: the setting is absent on that
+firmware), so one dropped reply at boot does not leave its record at 0. `ZaberAxisConfig` runs one poll before iocInit, so the record
 starts from the real position. Every poll: `get pos` (the position, IDLE or
 BUSY, the top warning flag), and `warnings` (the full list, a read) when
 that flag is not `--`. An axis that has not answered three polls in a row is
@@ -843,7 +845,9 @@ every other axis's stop or move, waiting behind it) a 0.5 s timeout.
 A move is `move abs <target>` (relative moves are added to the position
 just read; a BUSY axis refuses a move). It is **refused while the axis has
 no reference** (`WR`, after a power cycle until a home) unless
-`allow_unreferenced`: the manual warns that an unreferenced axis's limits
+`allow_unreferenced` (and refused, too, when a flag is up and the full
+`warnings` query failed: a WR may be hidden under a higher flag), since
+the manual warns that an unreferenced axis's limits
 and positions do not match its travel, so the record's DLLM/DHLM would be
 measured from the wrong origin. A refusal rather than a PROBLEM bit, because
 PROBLEM latches the record's alarm and clears its buttons, which would also
@@ -860,7 +864,10 @@ configuration (decision 15's exception).
 **Stop.** `stop` is sent unless a fresh, valid `get pos` reply says the
 axis is IDLE: a timeout, a garbled line or a rejection sends it anyway (a
 stop to an idle axis is harmless; one lost to a dropped reply is not), and a
-stop that itself fails returns an error. A second stop while the axis is
+stop that itself fails (no reply, or a rejection) returns an error and
+sets `$(P)$(M):stop_failed` (MAJOR) until a stop or move is acknowledged or
+the axis is seen at rest; it is not resent, since a second stop while
+decelerating is an instant stop. A second stop while the axis is
 still decelerating is the device's instant stop (the manual's `stop`),
 which is what a second press of STOP asks for; the driver does not filter
 it. `home` only with `allow_home` (toward the motor end at the device's
@@ -878,8 +885,12 @@ the firmware 7 manual's an overheating or over-current driver, "called
 Driver Disabled in 7.10 and below", the flag a `driver disable` raised
 there, so on 7.10 and below a driver some other client turned off reads as
 a fault. POWERED = no `FO` or `FD`. `WL` (a limit sensor interrupted a
-move) is the record's limit on the side of the last move or home (HLS or
-LLS), so a move cut short ends as a limit, not a completion. Three failed
+move; it latches until `warnings clear`) is the record's limit on one side,
+taken once on the poll where WL first appears, from the move or home of
+this IOC's that was running then (HLS or LLS), and held until WL clears, so
+later moves in either direction do not move it; a WL with no move of this
+IOC's behind it (left from before the IOC started) has no known side and is
+PROBLEM instead, until it clears. Three failed
 polls in a row also set PROBLEM; a single one is a comm error and refuses
 moves. The device stops at its stored `limit.min`/`limit.max` and rejects
 targets beyond them (`RJ BADDATA`); `FE` is a fault. Positions are the
@@ -890,7 +901,8 @@ by device id; the entity gives no default.
 
 **Latching flags.** FS, FE, FT, FQ and FB (faults: PROBLEM, the record's
 MAJOR alarm) and WL, WS, NI clear only with `warnings clear`. A put of 1 to
-`$(P)$(M):clear_warnings` sends it to that axis, only with the entity's
+`$(P)$(M):clear_warnings` (a momentary button: it reads back 0 after every
+put, so a refused put leaves no standing WRITE alarm) sends it to that axis, only with the entity's
 `allow_clear_warnings` (off by default: it acknowledges a fault without
 fixing its cause, an operator's decision) and only from the access
 security's writer. Without it the way out is the device's own: stop the
