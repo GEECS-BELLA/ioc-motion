@@ -443,8 +443,9 @@ entity_models:
           Upstream: CC before every command and poll, its result ignored, so
           while one pair moves another pair's poll reads the moving pair and a
           move for another pair goes to the moving pair's axis. false sends CC
-          only on a pair change, checks TE, refuses (move, latched problem)
-          or skips (poll) what a refused CC would misdirect, keeps each
+          only on a pair change, checks TE, refuses (a move or home: MAJOR
+          via the slip bit until one is accepted) or skips (poll) what a
+          refused CC would misdirect, keeps each
           axis's own count, never loses the selection to a missing reply (it
           is learned again with CC? or TS), and sends a STOP without a CC.
           README "Agilis AG-UC8". Applies to every AG_UC controller in the
