@@ -3,7 +3,7 @@
 The motion-controller image of GEECS-BELLA's native EPICS IOCs: the motor
 record on epics-containers' `ioc-motorsim` developer image (motor R7-4,
 asyn, autosave, motorSim, ...) plus `epics-motor/motorNewport` R1-3 (ESP300
-family, SMC100) and `epics-motor/motorAerotech` R1-1-1 (the Ensemble driver),
+family, SMC100, Agilis AG-UC8) and `epics-motor/motorAerotech` R1-1-1 (the Ensemble driver),
 our `motorVelmex` (the Velmex VXM + VRO driver, README "Velmex VXM + VRO"),
 and `geecsSerial.Port`, the one serial-line entity every serial device
 takes (local tty, raw TCP, RFC 2217: geecs-epics decision 15).
@@ -18,7 +18,8 @@ Details, the patch and the driver's gaps: `README.md`.
   `smctest1-sim`;
   `vxmtest1` (Velmex VXM + VRO `U_Velmex`, the 4 m undulator stage, two
   Digi ports over RFC 2217, profile `bench-vxm`) and its fake twin
-  `vxmtest1-sim`.
+  `vxmtest1-sim`; `agtest1` (Agilis AG-UC8 `U_ChicaneMotors`, USB serial on
+  htu-linux-camserv1, profile `bench-ag`).
 - **Why ours.** No epics-containers image carries motorNewport (TAU
   Systems' `ioc-motornewport` is tier 2, reference only: geecs-epics
   decision 10). The other motor families geecs-epics' device catalogue
@@ -34,7 +35,12 @@ Details, the patch and the driver's gaps: `README.md`.
   `SMC100StatusUpstream`, C default 1 (upstream: `setPosition` and
   `setClosedLoop` resend the driver's last command, which can be a move;
   `TS` read at fixed positions), entity defaults false, plus
-  `SMC100Motor.db` (README "SMC100").
+  `SMC100Motor.db` (README "SMC100"). And `AG_UCInitWrites` and
+  `AG_UCChannelUpstream`, C default 1 (upstream: `RS` and `SU` per axis at
+  boot; `CC` unchecked, so while one pair moves another pair's poll and move
+  go to it; `TP`, a per-slot counter shared by the pairs, read as each axis's
+  position), and `AG_UCJogAllowed`, C default 1 (the record's jog sends
+  `JA`), entity defaults false (README "Agilis AG-UC8").
   `ibek-support-geecs/motorAerotech/aerotech-ensemble.patch`:
   iocsh variable `EnsembleInitWrites`, C default 1 (upstream: a `NONE` probe,
   `RAMP MODE` and `WAIT MODE NOWAIT` at config); the `EnsembleSetup`

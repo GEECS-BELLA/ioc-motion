@@ -8,7 +8,7 @@ pvlogging, **motorSim**) plus:
 
 | Module | Version | Source | Reuse (decision 10) |
 |---|---|---|---|
-| motorNewport | R1-3 | [epics-motor/motorNewport](https://github.com/epics-motor/motorNewport) (ships no LICENSE file; tier 1 rests on the epics-motor org, geecs-epics device catalogue) | tier 1, dependency, with one build-time patch (below: ESP300, SMC100) |
+| motorNewport | R1-3 | [epics-motor/motorNewport](https://github.com/epics-motor/motorNewport) (ships no LICENSE file; tier 1 rests on the epics-motor org, geecs-epics device catalogue) | tier 1, dependency, with one build-time patch (below: ESP300, SMC100, Agilis AG-UC8) |
 | motorAerotech | R1-1-1 | [epics-motor/motorAerotech](https://github.com/epics-motor/motorAerotech) (ships no LICENSE file either; `drvEnsembleAsyn.cc` cites a synApps licence it does not ship); no upstream ibek-support recipe, so ours | tier 1, dependency, with one build-time patch (below) |
 | motorPIGCS2 | R1-3-1 | [epics-motor/motorPIGCS2](https://github.com/epics-motor/motorPIGCS2) (EPICS Open License); no upstream ibek-support recipe (INFN's targets their fork), so ours | tier 1, dependency, with one build-time patch of switches (below: PI hexapod) |
 
@@ -269,6 +269,200 @@ decode; until then they live here.
 - **Homing**: `OR` is accepted only NOT REFERENCED (error K in READY), so the
   record's HOMF/HOMR do nothing on a referenced stage; a re-home needs `RS`
   first, which the driver never sends.
+
+## Agilis AG-UC8 (AG-UC2, AG-UC8PC)
+
+`AG_UC` (motorNewport R1-3, Mark Rivers, 2013; the AG-UC8 channel support
+de7fd87) is a "model 3" asynMotor driver for Newport's Agilis piezo stepper
+controllers. Open loop: a position is the controller's step counter (`TP`:
+forward steps minus backward steps since power-up or `ZP`), and a step's size
+depends on its direction, the step amplitude (`SU`, 1-50) and the load (user
+manual EDH0224En5010 12/09, 4.7.4). The AG-UC8 drives four channel pairs of
+two axes; one pair is selected at a time (`CC1`..`CC4`) and the axis commands
+(`1PR`, `2TP`, ...) address the selected pair. The ibek entities:
+
+- `geecsSerial.Port` — the line: the AG-UC8's FTDI USB serial port,
+  `/dev/serial/by-id/usb-Newport_Agilis_<serial>-if00-port0`, 921600 8N1, no
+  flow control, CR LF both ways (manual 5.4.1; the AG-UC8PC's RS-232/485 jumpers
+  run at 115200).
+- `motorNewport.AG_UCController` — the driver on that port: `num_axes` (8 for
+  an AG-UC8), poll periods and the two switches below.
+- `motorNewport.AG_UCAxis` — one axis of a pair (`channel` 1-4, `axis` 1-2;
+  driver axis `(channel-1)*2 + axis-1`) as a motor record on `SMC100Motor.db`
+  (the patch's generic asynMotor record: RSTM Never, RTRY 0, DISP), in steps
+  (MRES 1, PREC 0). Only axes with an entity are polled.
+
+**Modes.** The controller powers up in local mode, where it answers only
+`VE`, `TS` and `TE`; `TP`, `PH`, `SU?`, `DL?` and every motion command answer
+nothing (an error -5 in `TE`). `MR` (remote) enables them. On the first unit
+(firmware `AG-UC8 v2.2.1`, 2026-10-29) a reply is the command echoed with its
+value (`1TP0`, `1SU+35`, `1SU-35`, `1DL0`, `PH0`, `CC1`, `TE0`), about 16 ms
+after the command; `MR` and `CCn` reply nothing. That unit's step amplitudes
+read 35 in both directions on every axis after a power-up, not the 16 the
+manual gives.
+
+### What the stock driver sends, and the patch
+
+At creation `AG_UCCreateController` sends `RS` (reset), `MR` and `VE` (the
+model from its reply); each `AG_UCCreateAxis` sends `CC<pair>` and
+`<axis>SU<forward>`, `CC<pair>` and `<axis>SU<reverse>` (a non-positive
+forward amplitude becomes 50; a non-negative reverse one was meant to become
+-50, but upstream assigns the forward one instead, so the default forward
+amplitude becomes -50: a second reverse setting). Each poll of an axis sends
+`CC<pair>`, `<axis>TP`, `<axis>TS` and `PH`; a move `CC` then `<axis>PR<n>`
+(an absolute move is `PR` to the target minus the last count read); a jog
+`JA<speed code>`; a home, only with `has_limits`, `MV<speed code>`; a stop
+`<axis>ST`; a position redefine (SET) sends nothing (an offset in the driver).
+
+- **`RS` and `SU` at every boot.** A reset sets every temporary setting to
+  its default and leaves local mode (manual, `RS`), and the `SU` lines then
+  overwrite the step amplitudes the unit was driven with: a step's size, and
+  so every calibration in µm per step, changes at an IOC start.
+- **`CC` is unchecked.** The AG-UC8 refuses `CC` (error -6) while an axis of
+  the selected pair moves (manual 5.7), and the driver ignores the refusal.
+  While one pair moves, the poller's `CC` for every other pair is refused and
+  those axes' polls read the moving pair's `TP` and `TS` as their own; a move
+  or stop sent then for an axis of another pair goes to the moving pair's
+  axis of the same number (`PR` is refused by a moving axis, accepted by an
+  idle one: the wrong actuator moves).
+- **One position per axis slot, not per axis.** The AG-UC8's step counter
+  belongs to the slot (axis 1 or 2), shared by the four pairs: on the first
+  unit (2026-10-29) `1PR10` on pair 1, then `CC2` (accepted, `TE0`), and
+  `1TP` answered `1TP10`. Upstream reads `TP` as each axis's position, so
+  every pair's axis n shows the same position, and an absolute move on one
+  pair is computed from steps another pair took.
+
+`motorNewport-geecs.patch`'s AG_UC part adds two iocsh variables, both
+defaulting to upstream behaviour (`variable()` lines in `devNewport.dbd`):
+
+| Variable | 1 (upstream) | 0 |
+|---|---|---|
+| `AG_UCInitWrites` | `RS` at creation, `SU` forward and reverse per axis | neither: creation sends `MR` and `VE` only |
+| `AG_UCChannelUpstream` | `CC` before every command and every axis poll, result ignored; position = `TP` | the selection kept and checked, each axis its own count, a STOP never behind a `CC` (below) |
+| `AG_UCJogAllowed` | the record's jog sends `JA` at a speed code | refused, nothing sent |
+
+`AG_UCController`'s `init_writes`, `channel_upstream` and `jog_allowed` render them and
+default to false; they are global to the IOC (`when: first`: a second
+controller with other values gets the first one's, unchecked). With
+`AG_UCChannelUpstream` 0:
+
+- **The selection.** The driver keeps the pair the controller has selected
+  and whether that is known now, apart from `refPair_`, the pair the slots'
+  counts are credited to. `CC` goes only on a pair change, then `TE`:
+  `TE0` selected; `TE-6` busy (the selected pair steps, the selection
+  unchanged); anything else (no reply, `TE-5` in local mode, another code, a
+  malformed reply) leaves the selection **unknown**, never "none". It is
+  learned again with `CC?`, or, if that goes unanswered, from a slot that
+  steps (`1TS`/`2TS` not 0): then the selected pair is `refPair_`, the only
+  pair this driver has moved.
+- **The counts.** Every change of a slot's `TP` is credited to `refPair_`'s
+  axis in that slot. `refPair_` changes only after an accepted `CC`: the pair
+  it leaves was idle (or the `CC` would have been refused), the counters
+  carry over, and nothing has moved the new pair yet, so the slots are read
+  then (`1TP`, `2TP`), credited to the old pair, and become the new pair's
+  references. A move goes only to the selected pair once it is `refPair_`,
+  so no step is lost or credited to the wrong axis whichever reply goes
+  missing. Each axis is 0 when the IOC starts. `TP` and `TS` replies that do
+  not echo their command are errors.
+- **One alarm bit: slip/stall.** Every alarm this driver raises is
+  `EA_SLIP_STALL` (MSTA bit 6, set through `motorStatusFollowingError_`;
+  `motorStatusSlip_` is bit 4, `EA_SLIP`, which the record does not read).
+  In motor R7-4 (the image's, `versions.json`) that bit is read only by
+  `alarm_sub` (STATE/MAJOR); it is not in the MOVN/`clear_buttons` test
+  (which reads `RA_PROBLEM` and the limits), and the record does not clear
+  it. The problem bit makes the record clear its jog buttons (b8's
+  unreleasable jog); the comms-error bit puts the record in COMM_ALARM, and
+  devMotorAsyn's `build_trans` then drops **every** command, STOP included
+  ("If we are already in COMM_ALARM then this server is not reachable"):
+  on 2026.10.3b10, which re-sent it every poll, a STOP after an IOC restart
+  mid-move never reached the driver (the fake). Neither is used.
+- **The poll.** Busy: the axis is done (it cannot move), its count kept.
+  A timeout, a malformed reply, an unknown selection or a `CC` refused with
+  another code (`TE-5` in local mode): the slip/stall bit while it lasts,
+  done kept as last read, so a stepping axis does not read done. An
+  accepted move, jog or home sets done 0 at once (`lastDone_`), so a late
+  reply on the first poll after it keeps DMOV 0.
+- **Move, home.** Sent only once the pair is selected; an absolute target is
+  computed from the axis's count read just before. Refused (busy, unknown,
+  or a home without `has_limits`): nothing sent, a console line, and the
+  refusal **latched in the slip/stall bit** until a later move, jog or home
+  of that axis is accepted: the refused move ends done **and MAJOR** in the
+  same update, VAL left at the target, and no jog button is touched. (b8 latched the
+  problem bit instead: the record then cleared the next jog's buttons, its
+  release sent no `ST` and the jog ran past DHLM; b9 latched nothing, and a
+  refused move read as success to a client checking DMOV and SEVR, ophyd's
+  `EpicsMotor` among them.) MISS stays 0 with RTRY 0.
+- **Jog.** `AG_UCJogAllowed` (below) 0 refuses it, nothing sent. Allowed and
+  refused (busy, unknown), or refused by the switch: the problem bit for
+  that one update, so the record clears its jog buttons rather than asking
+  again; the next poll clears it. An accepted move, jog or home clears the
+  problem and slip/stall bits at once.
+- **Stop never waits for a `CC`.** Known and another pair selected: nothing
+  on this pair moves, nothing sent. Known and this pair: `<axis>ST` at once.
+  Unknown: `<axis>ST` at once for an axis of `refPair_`, the only pair this
+  IOC can have set stepping, and for any axis while `refPair_` is 0 (this
+  IOC has moved nothing: after a restart mid-move the stepping pair is
+  unknown, and a stop must not be dropped); otherwise a stop for an idle
+  axis of another pair sends nothing (it would stop the stepping pair's axis
+  of the same number: the record sends a stop even to an idle axis).
+- **`refPair_` changes** only after an accepted `CC` and with both slots
+  reading `TS0` (the manual accepts `CC` only then), so a stale `TE0` read
+  as an acceptance cannot move the credit off a stepping pair.
+- **A failed resync** is not retried for 1 s, so a controller that answers
+  nothing (local mode, a stall) does not hold the poll lock, and a STOP
+  behind it, for a `CC?` timeout per axis.
+
+Outside the switches one fix: `PH2` sets axis 2's limit (upstream tested
+`PH3` twice). Upstream's step-amplitude lines are unchanged, so with
+`init_writes` true a reverse amplitude of 0 still sends `SU-50` as the
+forward amplitude and then `SU0` (refused by the controller). `MR` stays:
+nothing but `VE`, `TS` and `TE` answers without it. The channel check and the
+per-axis count are worth proposing upstream as they stand; the init writes as
+an option.
+
+The slip/stall bit for every alarm (the refusal latched, failures while
+they last, no COMM_ALARM) is 2026.10.3b11; `lastDone_` on acceptance, the
+STOP with `refPair_` 0 and the idle check before `refPair_` changes
+2026.10.3b10 (the third review of #18; b10 itself latched `motorStatusSlip_`,
+which is `EA_SLIP` and raises nothing, and re-sent the comms error, which
+blocked STOP); the comms-error, jog and
+stop-for-another-pair rules 2026.10.3b9 (the re-review); the selection rules 2026.10.3b8 (the review of #18: on
+b7 a single late reply mid-move zeroed the selection, after which the moving
+axis read done, its STOP went behind a refused `CC` and was dropped, and its
+steps were credited to nobody). On the first unit (geecs-epics `agtest1`,
+2026-10-29, tag 2026.10.3b7): a
+boot sends `MR` and `VE`, then the poll's `CC1`/`CC2` and queries only; all
+four configured axes moved ±10 and ±50 steps through the record and back,
+each reading its own count; the poll's `CC` was refused (`TE-6`) while a pair
+stepped and the poll skipped as above. 2026.10.3b3 read `TP` as upstream
+does (the per-slot finding); b4 and b5 lost steps between a pair's last poll
+and the `CC` (the fake) and are superseded.
+
+### Known gaps (R1-3, with the patch), from reading it
+
+- **Limits.** `PH` reports one bit per axis of the pair with no direction,
+  and the driver sets both the low and the high limit from it; stages without
+  a switch always read `PH0`.
+- **Velocity is not a setting.** `PR` runs at the controller's own rate
+  (the step delay `DL`, 10 µs units, 0 on the first unit); `VELO` only picks
+  the jog's speed code (`JA1`..`JA4`: 5, 100, 666 or 1700 steps/s, the last
+  two at the maximum amplitude) and the record's time estimate.
+- **No re-entry to remote mode.** A USB replug is a power cycle (the AG-UC8
+  is USB-powered): local mode, counters at 0. The IOC sends `MR` at creation
+  only, so afterwards every axis shows the slip/stall bit, STATE/MAJOR (its `TP` unanswered,
+  a `CC` answered `TE-5`, `CC?` unanswered) until the IOC is recreated, and
+  its counts are those of before the replug.
+- **`CC?` while a pair steps** is not proven on the unit (it answered while
+  idle); the `TS` fallback covers it once this IOC has moved a pair. After
+  an IOC restart mid-move (`refPair_` 0) nothing tells which pair steps:
+  every axis reads MAJOR until the motion ends, and a STOP for any axis sends
+  its `<axis>ST`.
+- **Positions are counts since the IOC started.** With the patch each axis
+  starts at 0 when the IOC does (the controller cannot say which pair took
+  the steps its slot counter holds); nothing in the controller survives a
+  power cycle either. SET is an offset in the driver, and upstream computes
+  it from the offset-included position, so a second SET without a move in
+  between lands off by the first offset (unpatched; SET is not used here).
 
 ## Aerotech Ensemble
 
