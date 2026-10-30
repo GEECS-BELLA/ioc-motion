@@ -4,8 +4,9 @@
 # and, read once at start with "get": the firmware version, device id,
 # peripheral id (the stage on an X-MCC axis; 0 on an integrated device),
 # serial number, and the device's stored maxspeed (velocity data units:
-# microsteps/s x 1.6384), limit.min and limit.max (native units). Read-only
-# records, updated by the poller; nothing here writes to the device.
+# microsteps/s x 1.6384), limit.min, limit.max (native units) and resolution
+# (microsteps per full step: MRES holds only for it). Read-only records,
+# updated by the poller, and one command record, clear_warnings (below).
 record(stringin, "$(P)$(M):flag")
 {
 	field(DESC, "Top warning flag of the last reply")
@@ -68,4 +69,23 @@ record(ai, "$(P)$(M):limit_max")
 	field(DTYP, "asynFloat64")
 	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_LIMIT_MAX")
 	field(SCAN, "I/O Intr")
+}
+record(longin, "$(P)$(M):resolution")
+{
+	field(DESC, "Microsteps per step (get resolution)")
+	field(DTYP, "asynInt32")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_RESOLUTION")
+	field(SCAN, "I/O Intr")
+}
+# The one write here: 1 sends "warnings clear" to this axis, only when its
+# entity has allow_clear_warnings (else refused, nothing sent), and only from
+# the access security's writer. It acknowledges the latching flags (FS, FE,
+# FT, FQ, FB, WL, WS, NI); their cause is the operator's to fix first.
+record(bo, "$(P)$(M):clear_warnings")
+{
+	field(DESC, "Send warnings clear")
+	field(DTYP, "asynInt32")
+	field(OUT,  "@asyn($(PORT),$(ADDR))ZABER_CLEAR_WARNINGS")
+	field(ZNAM, "Idle")
+	field(ONAM, "Clear")
 }

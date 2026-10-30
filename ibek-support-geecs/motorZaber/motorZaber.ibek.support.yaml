@@ -52,7 +52,8 @@ entity_models:
       One Zaber axis as a motor record ($(P)$(M)) on ZaberMotor.db, with its
       flags, identity and stored settings as $(P)$(M):<name> (ZaberAxis.db).
       RSTM Never, DISP at boot. Positions in the device's native units
-      (microsteps), MRES converts.
+      (microsteps), MRES converts. One command record beyond the motor
+      record: $(P)$(M):clear_warnings (allow_clear_warnings).
     parameters:
       controller:
         type: object
@@ -114,6 +115,25 @@ entity_models:
           Seconds after a move ends before "driver disable" (on_for_move);
           resolved by the poll period
         default: 0.5
+      allow_unreferenced:
+        type: bool
+        description: |-
+          false: a move while the axis has no reference position (WR, after
+          a power cycle until a home) is refused, nothing sent: the device's
+          positions and limits then do not match the travel, so the record's
+          DLLM/DHLM would be measured from the wrong origin; true: accepted.
+          A home is accepted either way (with allow_home)
+        default: false
+      allow_clear_warnings:
+        type: bool
+        description: |-
+          true: a put of 1 to $(P)$(M):clear_warnings sends "warnings clear"
+          to this axis, which clears the latching flags (FS, FE, FT, FQ, FB,
+          WL, WS, NI ...) and so the PROBLEM they hold; false: refused,
+          nothing sent. It acknowledges a fault without fixing its cause, so
+          it is an operator's decision; the record is writable only by the
+          access security's writer
+        default: false
       DESC:
         type: str
         description: |-
@@ -217,8 +237,8 @@ entity_models:
 
     pre_init:
       - value: |
-          # ZaberAxisConfig(motorPort, motor, device, axis, speedArgs, allowHome, powerPolicy, powerOffDelay)
-          ZaberAxisConfig("{{controller.name}}", {{motor}}, {{device}}, {{axis}}, {{ 1 if speed_args else 0 }}, {{ 1 if allow_home else 0 }}, "{{power_policy}}", "{{power_off_delay}}")
+          # ZaberAxisConfig(motorPort, motor, device, axis, speedArgs, allowHome, powerPolicy, powerOffDelay, allowUnreferenced, allowClearWarnings)
+          ZaberAxisConfig("{{controller.name}}", {{motor}}, {{device}}, {{axis}}, {{ 1 if speed_args else 0 }}, {{ 1 if allow_home else 0 }}, "{{power_policy}}", "{{power_off_delay}}", {{ 1 if allow_unreferenced else 0 }}, {{ 1 if allow_clear_warnings else 0 }})
 
     databases:
       - file: ZaberMotor.db

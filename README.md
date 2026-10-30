@@ -792,8 +792,9 @@ limit polarity waits for a switch.
 `ZaberDriver` (`motorZaber/`, ours) is a "model 3" asynMotor driver for Zaber
 devices on the Zaber ASCII protocol: A-series and X-series integrated
 stages, X-MCC controllers, and a daisy chain of them on one serial line.
-Written from Zaber's ASCII protocol manual (zaber.com/protocol-manual, read
-2026-10-29); no code copied. Why ours: Zaber's own
+Written from Zaber's ASCII protocol manuals (firmware 7:
+zaber.com/protocol-manual; firmware 6: zaber.com/wiki/Manuals/ASCII_Protocol_Manual;
+read 2026-10-29); no code copied. Why ours: Zaber's own
 [`zabertech/motorZaberMotion`](https://github.com/zabertech/motorZaberMotion)
 (v2.2.0) ships no licence, so it is a reference only (geecs-epics decision
 10), and it wraps the Zaber Motion Library's downloaded binaries (an online
@@ -812,59 +813,102 @@ The ibek entities (`ibek-support-geecs/motorZaber/motorZaber.ibek.support.yaml`)
   record axes, poll periods. Creation sends nothing.
 - `motorZaber.ZaberAxis`: one record axis = one (device address, axis)
   pair: a chain of integrated stages is addresses 1..n with axis 1 each, an
-  X-MCC one address with axes 1..4. A motor record on `ZaberMotor.db` (RSTM
-  Never, DISP on by default) and the axis's readings on `ZaberAxis.db` as
-  `$(P)$(M):flag`, `:warnings`, `:version`, `:device_id`, `:peripheral_id`,
-  `:serial`, `:maxspeed`, `:limit_min`, `:limit_max`. Switches, all off by
-  default: `speed_args`, `allow_home`, `power_policy`.
+  X-MCC one address with axes 1..4; two record axes on one pair are refused.
+  A motor record on `ZaberMotor.db` (RSTM Never, DISP on by default) and the
+  axis's readings on `ZaberAxis.db` as `$(P)$(M):flag`, `:warnings`,
+  `:version`, `:device_id`, `:peripheral_id`, `:serial`, `:resolution`,
+  `:maxspeed`, `:limit_min`, `:limit_max`, plus one command record,
+  `:clear_warnings`. Switches, all off by default: `speed_args`,
+  `allow_home`, `allow_unreferenced`, `allow_clear_warnings`, `power_policy`.
 
-**What goes down the line.** Every command is `/<device> <axis> <command>`
-to one device and axis: never the broadcast address 0, never `set`,
-`renumber` or `system ...`. Once per axis, `get version`, `get deviceid`
-(then `device.id` if rejected) and `get system.serial` on axis 0, and
-`get peripheralid` (then `peripheral.id`), `get maxspeed`, `get limit.min`
-and `get limit.max` on the axis. `ZaberAxisConfig` runs that pass and one
-poll before iocInit, so the record starts from the real position. Every
-poll: `get pos` (the position, IDLE or BUSY, the top warning flag), and
-`warnings` (the full flag list, a read) when that flag is not `--`. A move
-is `move abs <target>` (relative moves are added to the position just read;
-a BUSY axis refuses a move). With `speed_args` it is
-`move abs <target> <speed> <accel>`, from the record's velocity and
+**What goes down the line.** Every command is
+`/<device> <axis> <id> <command>`, to one device and axis, with a message id
+(00-99, cycling): never the broadcast address 0, never `set`, `renumber` or
+`system ...`. A reply is taken only when its address, axis and id are this
+command's, so alerts (`!`), info lines (`#`), another address's reply and a
+late reply to an earlier command are skipped; a line whose checksum (the
+manual's LRC, present when the device's `comm.checksum` is 1) does not
+verify is dropped. After an axis's first answered `get pos`: `get version`,
+`get deviceid` (then `device.id`) and `get system.serial` on axis 0, and
+`get peripheralid` (then `peripheral.id`), `get resolution`, `get maxspeed`,
+`get limit.min`, `get limit.max` on the axis, all retried on later polls
+until `get version` answers (a stage off or slow at boot is identified when
+it answers). `ZaberAxisConfig` runs one poll before iocInit, so the record
+starts from the real position. Every poll: `get pos` (the position, IDLE or
+BUSY, the top warning flag), and `warnings` (the full list, a read) when
+that flag is not `--`. An axis that has not answered three polls in a row is
+asked once per ten polls, so a silent address does not cost every poll (and
+every other axis's stop or move, waiting behind it) a 0.5 s timeout.
+
+A move is `move abs <target>` (relative moves are added to the position
+just read; a BUSY axis refuses a move). It is **refused while the axis has
+no reference** (`WR`, after a power cycle until a home) unless
+`allow_unreferenced`: the manual warns that an unreferenced axis's limits
+and positions do not match its travel, so the record's DLLM/DHLM would be
+measured from the wrong origin. A refusal rather than a PROBLEM bit, because
+PROBLEM latches the record's alarm and clears its buttons, which would also
+stand in the way of the home that gives the reference; HOMED 0 and the
+`:flag` record show the state. With `speed_args` a move is
+`move abs <target> <speed> <accel>` from the record's velocity and
 acceleration in the protocol's data units (velocity: microsteps/s × 1.6384;
-accel: microsteps/s² × 1.6384 / 10000). That form exists from firmware 7.25
-only. Without it the device's own stored `maxspeed` and `accel` govern, and
-the record's VELO is informational. The driver never writes a setting: they
-are the device's configuration (decision 15's exception). A stop reads
-`get pos` afresh and sends `stop` only to a BUSY axis, because the record
-sends STOP to idle axes too. `home` is sent only with `allow_home`: it runs
-toward the motor end at the device's `limit.approach.maxspeed` and sets the
-reference (WR clears). `power_policy: on_for_move` sends `driver enable`
-before each move or home and `driver disable` `power_off_delay` s after it
-ends (the LabVIEW driver's `automotoroff`). Alerts (`!`), info lines (`#`)
-and replies from another address are skipped.
+accel: microsteps/s² × 1.6384 / 10000), refused locally on firmware below
+7.25 (or not read yet), where that form is BADDATA; without it the device's
+own stored `maxspeed` and `accel` govern and the record's VELO is
+informational. The driver never writes a setting: they are the device's
+configuration (decision 15's exception).
 
-**Status.** DONE = not BUSY. HOMED = no `WR` (no reference position) among
-the flags. PROBLEM = any fault flag (`F...`) except the driver being off:
-`FO` from firmware 7.11, and `FD` up to 7.10, where it meant "driver
-disabled" (from 7.11 it is a temperature or current fault). POWERED = no
-`FO` or disable-`FD`. Three failed polls in a row also set PROBLEM; a
-single one is a comm error and refuses moves. No limit switches as such:
-the device stops at its stored `limit.min`/`limit.max` and rejects targets
-beyond them (`RJ BADDATA`); `FE` is a fault. Positions are the device's
-native units (microsteps on a stepper, encoder counts on a direct drive).
-`MRES` is the microstep size at the device's resolution, from its manual
-or Zaber's device database by device id; the entity gives no default.
+**Stop.** `stop` is sent unless a fresh, valid `get pos` reply says the
+axis is IDLE: a timeout, a garbled line or a rejection sends it anyway (a
+stop to an idle axis is harmless; one lost to a dropped reply is not), and a
+stop that itself fails returns an error. A second stop while the axis is
+still decelerating is the device's instant stop (the manual's `stop`),
+which is what a second press of STOP asks for; the driver does not filter
+it. `home` only with `allow_home` (toward the motor end at the device's
+`limit.approach.maxspeed`; it sets the reference, so it is accepted under
+WR). `power_policy: on_for_move` sends `driver enable` before each move or
+home and `driver disable` `power_off_delay` s after it ends (the LabVIEW
+driver's `automotoroff`).
+
+**Status.** DONE = not BUSY. HOMED = neither `WR` nor `WH` (homed, but not
+to the reference its calibration expects). PROBLEM = any fault flag
+(`F...`) except the driver off by request: `FO`, and `FD` while this IOC's
+own `driver disable` stands. `FD` is a fault otherwise, on every firmware:
+the firmware 6 manual's FD is the driver disabling itself on overheating,
+the firmware 7 manual's an overheating or over-current driver, "called
+Driver Disabled in 7.10 and below", the flag a `driver disable` raised
+there, so on 7.10 and below a driver some other client turned off reads as
+a fault. POWERED = no `FO` or `FD`. `WL` (a limit sensor interrupted a
+move) is the record's limit on the side of the last move or home (HLS or
+LLS), so a move cut short ends as a limit, not a completion. Three failed
+polls in a row also set PROBLEM; a single one is a comm error and refuses
+moves. The device stops at its stored `limit.min`/`limit.max` and rejects
+targets beyond them (`RJ BADDATA`); `FE` is a fault. Positions are the
+device's native units (microsteps on a stepper, encoder counts on a direct
+drive). `MRES` is the microstep size at the device's resolution
+(`:resolution`, 64 by default), from its manual or Zaber's device database
+by device id; the entity gives no default.
+
+**Latching flags.** FS, FE, FT, FQ and FB (faults: PROBLEM, the record's
+MAJOR alarm) and WL, WS, NI clear only with `warnings clear`. A put of 1 to
+`$(P)$(M):clear_warnings` sends it to that axis, only with the entity's
+`allow_clear_warnings` (off by default: it acknowledges a fault without
+fixing its cause, an operator's decision) and only from the access
+security's writer. Without it the way out is the device's own: stop the
+IOC, clear on the device (Zaber Launcher or a terminal), start the IOC.
 
 **Refused, nothing sent:** jog (`moveVelocity`: a `move vel` that loses its
 stop runs to the end of travel; the record's tweaks are moves and work),
-`setPosition` (`set pos` would move the device's reference), and home
-without `allow_home`.
+`setPosition` (`set pos` would move the device's reference), a move under
+WR without `allow_unreferenced`, home without `allow_home`, and
+`warnings clear` without `allow_clear_warnings`.
 
-**Known gaps:** no Binary protocol (the T-series); `NI`, `WL` and the other
-warnings are shown and never cleared (`warnings clear` is a write);
-lockstep, streams and the knob are not driven. The device's behaviour on a
-move without a reference (WR) is unverified. Proven only on geecs-epics'
-fake (`sim/zaber_sim.py`, 2026-10-29); U_Zaber's snapshot comes next.
+**Known gaps:** no Binary protocol (the T-series); lockstep, streams and
+the knob are not driven; the device's behaviour on `move abs` under WR is
+unverified (the driver refuses it anyway). Proven only on geecs-epics' fake
+(`sim/zaber_sim.py`, which models message ids, checksums, alerts, braking,
+WR and the manuals' flag order, and has fault hooks: two dated proofs in
+`services/undulator/motion/zabertest1/records/`); U_Zaber's snapshot comes
+next.
 
 ## Licence
 
