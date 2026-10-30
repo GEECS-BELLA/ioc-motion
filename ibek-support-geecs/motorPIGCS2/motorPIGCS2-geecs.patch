@@ -857,7 +857,7 @@ index ec83efb..2cac840 100644
      virtual asynStatus moveVelocity(double minVelocity, double maxVelocity, double acceleration);
      virtual asynStatus home(double minVelocity, double maxVelocity, double acceleration, int forwards);
 diff --git a/pigcs2App/src/PIasynController.cpp b/pigcs2App/src/PIasynController.cpp
-index b993d1a..9084e03 100644
+index b993d1a..f9b8610 100644
 --- a/pigcs2App/src/PIasynController.cpp
 +++ b/pigcs2App/src/PIasynController.cpp
 @@ -107,6 +107,13 @@ PIasynController::PIasynController(const char *portName, const char* asynPort, i
@@ -874,7 +874,7 @@ index b993d1a..9084e03 100644
      if (!PIasynControllerListInitialized)
      {
          PIasynControllerListInitialized = 1;
-@@ -149,6 +156,17 @@ PIasynController::PIasynController(const char *portName, const char* asynPort, i
+@@ -149,6 +156,19 @@ PIasynController::PIasynController(const char *portName, const char* asynPort, i
  	char inputBuff[256];
  	inputBuff[0] = '\0';
  	status = pInterface->sendAndReceive("*IDN?", inputBuff, 255, pAsynCom);
@@ -882,7 +882,9 @@ index b993d1a..9084e03 100644
 +	{
 +		// ioc-motion: the first command on a line that has just opened can be lost (a serial
 +		// server still negotiating RFC 2217 swallowed it on the bench, 2026-10-29) and the IOC
-+		// would come up with no controller. Ask once more before giving up.
++		// would come up with no controller. Ask once more before giving up. (A reply to the
++		// first query arriving late is drained by the retry's flush, or read as its answer:
++		// the same text.)
 +		asynPrint(pAsynCom, ASYN_TRACE_ERROR,
 +			  "PIasynController: no answer to *IDN? on %s (status %d), asking once more\n",
 +			  asynPort, int(status));
@@ -892,7 +894,7 @@ index b993d1a..9084e03 100644
  	// It is helpful to see IDN strings when an IOC starts, so use ASYN_TRACE_ERROR instead of ASYN_TRACE_FLOW
  	asynPrint(pAsynCom, ASYN_TRACE_ERROR,
  			  "read from %s: %s\n",
-@@ -189,6 +207,8 @@ PIasynController::PIasynController(const char *portName, const char* asynPort, i
+@@ -189,6 +209,8 @@ PIasynController::PIasynController(const char *portName, const char* asynPort, i
          pAxis->Init(portName);
      }
  
@@ -901,7 +903,7 @@ index b993d1a..9084e03 100644
      startPoller(double(movingPollPeriod)/1000, double(idlePollPeriod)/1000, 10);
  }
  
-@@ -247,7 +267,7 @@ asynStatus PIasynController::processDeferredMoves()
+@@ -247,7 +269,7 @@ asynStatus PIasynController::processDeferredMoves()
          if (pAxis->deferred_move)
          {
          	pAxesArray[numDeferredAxes] = pAxis;
@@ -910,7 +912,7 @@ index b993d1a..9084e03 100644
          	pAxis->setIntegerParam(motorStatusDone_, 0);
          	pAxis->callParamCallbacks();
          	numDeferredAxes++;
-@@ -322,6 +342,35 @@ asynStatus PIasynController::writeInt32(asynUser *pasynUser, epicsInt32 value)
+@@ -322,6 +344,35 @@ asynStatus PIasynController::writeInt32(asynUser *pasynUser, epicsInt32 value)
  		m_pGCSController->m_targetMode = value;
          setIntegerParam(0, PI_CS_TARGETMODE, value);
      }
@@ -946,7 +948,7 @@ index b993d1a..9084e03 100644
      else {
          /* Call base class call its method (if we have our parameters check this here) */
          status = asynMotorController::writeInt32(pasynUser, value);
-@@ -579,6 +628,23 @@ asynStatus PIasynController::configAxis(PIasynAxis *pAxis)
+@@ -579,6 +630,23 @@ asynStatus PIasynController::configAxis(PIasynAxis *pAxis)
  asynStatus PIasynController::poll()
  {
      m_pGCSController->getGlobalState(pAxes_, numAxes_);
