@@ -450,6 +450,13 @@ entity_models:
           README "Agilis AG-UC8". Applies to every AG_UC controller in the
           IOC.
         default: false
+      jog_allowed:
+        type: bool
+        description: |-
+          Upstream: the record's jog (JOGF/JOGR) sends JA at a speed code
+          and its release ST. false refuses the jog, nothing sent. Applies
+          to every AG_UC controller in the IOC.
+        default: false
 
     pre_init:
       - when: first
@@ -457,6 +464,7 @@ entity_models:
           # ioc-motion's AG_UC patch (README "Agilis"): 1 = upstream behaviour
           var AG_UCInitWrites {{ 1 if init_writes else 0 }}
           var AG_UCChannelUpstream {{ 1 if channel_upstream else 0 }}
+          var AG_UCJogAllowed {{ 1 if jog_allowed else 0 }}
       - value: |
           # AG_UCCreateController(motorPort, serialPort, numAxes, movingPollMs, idlePollMs)
           AG_UCCreateController("{{name}}", "{{port.name}}", {{num_axes}}, {{moving_poll_ms}}, {{idle_poll_ms}})
