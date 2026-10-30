@@ -52,7 +52,7 @@ index 0000000..8e47142
 +	field(DISP, "$(DISP=0)")
 +}
 diff --git a/newFocusApp/src/874xMotorDriver.cpp b/newFocusApp/src/874xMotorDriver.cpp
-index ec63c07..1945c74 100644
+index ec63c07..b755d97 100644
 --- a/newFocusApp/src/874xMotorDriver.cpp
 +++ b/newFocusApp/src/874xMotorDriver.cpp
 @@ -27,6 +27,38 @@ March 4, 2011
@@ -94,7 +94,7 @@ index ec63c07..1945c74 100644
  #define NUM_nf874x_PARAMS 3
  
  static const char *driverName = "nf874xMotorDriver";
-@@ -69,11 +101,36 @@ nf874xController::nf874xController(const char *portName, const char *nf874xPortN
+@@ -69,11 +101,45 @@ nf874xController::nf874xController(const char *portName, const char *nf874xPortN
    // Retrieve controller model name (8742/8743-CL)
    // Set default control mode (open, closed) based on model
    sprintf(this->outString_, "VE?");
@@ -122,20 +122,29 @@ index ec63c07..1945c74 100644
 +      driverName, functionName, this->inString_, modelName_[0] ? modelName_ : "unknown");
    
 +  if (nf874xCheckMoves) {
-+    // Drain errors queued before this IOC (a FIFO of ten, read once each).
-+    for (int i = 0; i < 10; i++) {
-+      sprintf(this->outString_, "TE?");
-+      memset(this->inString_, 0, sizeof(this->inString_));
-+      if (this->writeReadController() != asynSuccess) break;
-+      if (atoi(this->inString_) == 0) break;
-+      asynPrint(this->pasynUserSelf, ASYN_TRACE_ERROR,
-+          "%s:%s: error queued before start: %s\n", driverName, functionName, this->inString_);
++    // Drain errors queued before this IOC (ten deep, read once each), on
++    // every controller of a chain (4 channels each; 2 on an 8743-CL is not
++    // known yet here, so a chain of 8743-CLs is drained as if of 8742s).
++    int controllers = numAxes > 4 ? (numAxes + 3) / 4 : 1;
++    for (int c = 1; c <= controllers; c++) {
++      for (int i = 0; i < 10; i++) {
++        if (controllers > 1)
++          sprintf(this->outString_, "%d>TE?", c);
++        else
++          sprintf(this->outString_, "TE?");
++        memset(this->inString_, 0, sizeof(this->inString_));
++        if (this->writeReadController() != asynSuccess) break;
++        const char *gt = strchr(this->inString_, '>');
++        if (atoi(gt ? gt + 1 : this->inString_) == 0) break;
++        asynPrint(this->pasynUserSelf, ASYN_TRACE_ERROR,
++            "%s:%s: error queued before start: %s\n", driverName, functionName, this->inString_);
++      }
 +    }
 +  }
    if(strcmp(modelName_, "8743-CL") == 0)
      hasClosedLoopSupport_ = true;
    else
-@@ -240,6 +297,14 @@ nf874xAxis::nf874xAxis(nf874xController *pC, int axisNo)
+@@ -240,6 +306,14 @@ nf874xAxis::nf874xAxis(nf874xController *pC, int axisNo)
    : asynMotorAxis(pC, axisNo),
      pC_(pC)
  {
@@ -150,7 +159,7 @@ index ec63c07..1945c74 100644
    // For daisy-chained controllers, assuming k axes per controller, and controllers number (1, 2, ...)
    // 8742 has 4 axes per controller; 8743 with closed-loop support only has 2.
    // Note that axis 1>3 addresses the same motor as bare 3, but response strings will be prefixed with 1>.
-@@ -311,6 +376,8 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
+@@ -311,6 +385,8 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
    
    status = pC_->writeController();
    lastDirection_ = targetPosition_ > encoderPosition_;
@@ -159,7 +168,7 @@ index ec63c07..1945c74 100644
    return status;
  }
  
-@@ -324,6 +391,13 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
+@@ -324,6 +400,13 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
  asynStatus nf874xAxis::home(double minVelocity, double maxVelocity, double acceleration, int forwards)
  {
    asynStatus status;
@@ -173,7 +182,7 @@ index ec63c07..1945c74 100644
    
    sprintf(pC_->outString_, "%s AC %f", axisName_, acceleration);
    status = pC_->writeController();
-@@ -350,6 +424,12 @@ asynStatus nf874xAxis::moveVelocity(double minVelocity, double maxVelocity, doub
+@@ -350,6 +433,12 @@ asynStatus nf874xAxis::moveVelocity(double minVelocity, double maxVelocity, doub
    double speed=maxVelocity;
    int forwards=1;
  
@@ -186,7 +195,7 @@ index ec63c07..1945c74 100644
    if (speed < 0) {
      speed = -speed;
      forwards = 0;
-@@ -361,6 +441,8 @@ asynStatus nf874xAxis::moveVelocity(double minVelocity, double maxVelocity, doub
+@@ -361,6 +450,8 @@ asynStatus nf874xAxis::moveVelocity(double minVelocity, double maxVelocity, doub
    sprintf(pC_->outString_, "%s MV %s", axisName_, forwards ? "+" : "-");
    status = pC_->writeController();
    lastDirection_ = forwards;
@@ -195,7 +204,7 @@ index ec63c07..1945c74 100644
    return status;
  }
  
-@@ -444,9 +526,11 @@ asynStatus nf874xAxis::doMoveToHome()
+@@ -444,9 +535,11 @@ asynStatus nf874xAxis::doMoveToHome()
  asynStatus nf874xAxis::setHighLimit(double highLimit) {
    asynStatus status;
  
@@ -208,7 +217,7 @@ index ec63c07..1945c74 100644
    return status;
  }
  
-@@ -456,9 +540,11 @@ asynStatus nf874xAxis::setHighLimit(double highLimit) {
+@@ -456,9 +549,11 @@ asynStatus nf874xAxis::setHighLimit(double highLimit) {
  asynStatus nf874xAxis::setLowLimit(double lowLimit) {
    asynStatus status;
  
@@ -221,7 +230,7 @@ index ec63c07..1945c74 100644
    return status;
  }
  
-@@ -565,11 +651,51 @@ asynStatus nf874xAxis::poll(bool *moving)
+@@ -565,11 +660,64 @@ asynStatus nf874xAxis::poll(bool *moving)
          driverName, functionName, comStatus);
    }
    
@@ -259,6 +268,19 @@ index ec63c07..1945c74 100644
 +    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
 +        "%s: axis %s: %s refused, TE? %d (problem bit latched)\n",
 +        driverName, axisName_, what, code);
++    // The queue holds one entry per error and TE? reads one: a move and its
++    // retry refused leave a second code that the next axis's TE? would read
++    // as its own (U_BlueDiodePicos, 2026-10-30: m5's second 2>108 flagged
++    // m6's first move). Read the rest now, at most nine more.
++    for (int i = 0; i < 9; i++) {
++      memset(pC_->inString_, 0, sizeof(pC_->inString_));
++      if (pC_->writeReadController() != asynSuccess) break;
++      const char *more = strchr(pC_->inString_, '>');
++      int next = atoi(more ? more + 1 : pC_->inString_);
++      if (next == 0) break;
++      asynPrint(pasynUser_, ASYN_TRACE_ERROR,
++          "%s: axis %s: also queued: TE? %d\n", driverName, axisName_, next);
++    }
 +    setIntegerParam(pC_->motorStatusProblem_, 1);
 +    callParamCallbacks();
 +    return asynError;
