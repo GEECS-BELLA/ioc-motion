@@ -1,0 +1,107 @@
+# ioc-motion: what the Zaber driver reads for one axis beyond its motor record,
+# as $(P)$(M):<name>: the top warning flag of the last reply ("--" none), the
+# full flag list (the "warnings" query, read when the top flag is not "--"),
+# and, read once at start with "get": the firmware version, device id,
+# peripheral id (the stage on an X-MCC axis; 0 on an integrated device),
+# serial number, and the device's stored maxspeed (velocity data units:
+# microsteps/s x 1.6384), limit.min, limit.max (native units) and resolution
+# (microsteps per full step: MRES holds only for it). Read-only records,
+# updated by the poller, and one command record, clear_warnings (below).
+record(stringin, "$(P)$(M):flag")
+{
+	field(DESC, "Top warning flag of the last reply")
+	field(DTYP, "asynOctetRead")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_FLAG")
+	field(SCAN, "I/O Intr")
+}
+record(stringin, "$(P)$(M):warnings")
+{
+	field(DESC, "All warning flags (warnings)")
+	field(DTYP, "asynOctetRead")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_WARNINGS")
+	field(SCAN, "I/O Intr")
+}
+record(stringin, "$(P)$(M):version")
+{
+	field(DESC, "Firmware (get version)")
+	field(DTYP, "asynOctetRead")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_VERSION")
+	field(SCAN, "I/O Intr")
+}
+record(longin, "$(P)$(M):device_id")
+{
+	field(DESC, "Device id (get deviceid)")
+	field(DTYP, "asynInt32")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_DEVICE_ID")
+	field(SCAN, "I/O Intr")
+}
+record(longin, "$(P)$(M):peripheral_id")
+{
+	field(DESC, "Peripheral id (get peripheralid)")
+	field(DTYP, "asynInt32")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_PERIPHERAL_ID")
+	field(SCAN, "I/O Intr")
+}
+record(longin, "$(P)$(M):serial")
+{
+	field(DESC, "Serial number (get system.serial)")
+	field(DTYP, "asynInt32")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_SERIAL")
+	field(SCAN, "I/O Intr")
+}
+record(ai, "$(P)$(M):maxspeed")
+{
+	field(DESC, "Stored maxspeed (data units)")
+	field(DTYP, "asynFloat64")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_MAXSPEED")
+	field(SCAN, "I/O Intr")
+}
+record(ai, "$(P)$(M):limit_min")
+{
+	field(DESC, "Stored limit.min (native units)")
+	field(DTYP, "asynFloat64")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_LIMIT_MIN")
+	field(SCAN, "I/O Intr")
+}
+record(ai, "$(P)$(M):limit_max")
+{
+	field(DESC, "Stored limit.max (native units)")
+	field(DTYP, "asynFloat64")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_LIMIT_MAX")
+	field(SCAN, "I/O Intr")
+}
+record(longin, "$(P)$(M):resolution")
+{
+	field(DESC, "Microsteps per step (get resolution)")
+	field(DTYP, "asynInt32")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_RESOLUTION")
+	field(SCAN, "I/O Intr")
+}
+# The one write here, a momentary button (HIGH: the record returns itself to
+# Idle 0.5 s after every put, and the 0 it writes sends nothing; a refused put
+# is logged by the IOC and leaves no alarm): 1 sends "warnings clear" to this axis, only when its
+# entity has allow_clear_warnings (else refused, nothing sent), and only from
+# the access security's writer. It acknowledges the latching flags (FS, FE,
+# FT, FQ, FB, WL, WS, NI); their cause is the operator's to fix first.
+record(bo, "$(P)$(M):clear_warnings")
+{
+	field(DESC, "Send warnings clear")
+	field(DTYP, "asynInt32")
+	field(OUT,  "@asyn($(PORT),$(ADDR))ZABER_CLEAR_WARNINGS")
+	field(ZNAM, "Idle")
+	field(ONAM, "Clear")
+	field(HIGH, "0.5")
+}
+# A stop that got no reply or a rejection: MAJOR until a stop or move is
+# acknowledged or the axis is seen at rest. Not resent automatically (a
+# second stop while decelerating is the device's instant stop).
+record(bi, "$(P)$(M):stop_failed")
+{
+	field(DESC, "Last stop unacknowledged")
+	field(DTYP, "asynInt32")
+	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_STOP_FAILED")
+	field(SCAN, "I/O Intr")
+	field(ZNAM, "OK")
+	field(ONAM, "Failed")
+	field(OSV,  "MAJOR")
+}

@@ -1,0 +1,33 @@
+# ioc-motion: one Zaber axis (a device address and axis on a Zaber ASCII
+# line) as a motor record on ZaberDriver (DTYP asynMotor). Positions are the
+# device's native units (microsteps, or encoder counts on a direct drive);
+# MRES converts them to EGU. RSTM Never: the record never asks the driver to
+# redefine the position at init (set pos would move the device's reference;
+# the driver refuses it anyway). DISP 1 refuses every put to the record's
+# fields without stopping the driver's status callbacks, so readbacks stay
+# live. The axis's flags, identity and stored settings are ZaberAxis.db.
+record(motor, "$(P)$(M)")
+{
+	field(DESC, "$(DESC)")
+	field(DTYP, "asynMotor")
+	field(OUT,  "@asyn($(PORT),$(ADDR))")
+	field(DIR,  "$(DIR)")
+	field(VELO, "$(VELO)")
+	field(VBAS, "$(VBAS)")
+	field(VMAX, "$(VMAX)")
+	field(ACCL, "$(ACCL)")
+	field(HVEL, "$(HVEL)")
+	field(BDST, "$(BDST)")
+	field(BVEL, "$(BVEL)")
+	field(BACC, "$(BACC)")
+	field(MRES, "$(MRES)")
+	field(PREC, "$(PREC)")
+	field(EGU,  "$(EGU)")
+	field(DHLM, "$(DHLM)")
+	field(DLLM, "$(DLLM)")
+	field(RDBD, "$(RDBD)")
+	field(RTRY, "$(RTRY)")
+	field(RSTM, "Never")
+	field(TWV,  "$(TWV)")
+	field(DISP, "$(DISP)")
+}

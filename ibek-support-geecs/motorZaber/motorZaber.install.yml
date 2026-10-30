@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../../ibek-support/_scripts/support_install_variables.json
+
+# The module's source is in this repository (motorZaber/), copied to
+# /epics/support/motorZaber by the Dockerfile before ansible.sh runs, so the
+# clone step finds it in place and builds it (as motorVelmex).
+module: motorZaber
+version: local
+
+dbds:
+  - motorZaberSupport.dbd
+  - motorRecord.dbd
+  - motorSupport.dbd
+
+libs:
+  - motorZaber
+  - motor
+  - asyn

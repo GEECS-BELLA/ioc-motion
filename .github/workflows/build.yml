@@ -193,3 +193,6 @@ jobs:
             ibek.ioc.schema.json
             versions.json
           generate_release_notes: true
+          # A CalVer pre-release tag (2026.10.3b1) is a branch build for bench
+          # work: a pre-release, never "Latest" (CLAUDE.md, "Images").
+          prerelease: ${{ contains(github.ref_name, 'b') }}
