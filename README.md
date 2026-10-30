@@ -890,7 +890,10 @@ taken once on the poll where WL first appears, from the move or home of
 this IOC's that was running then (HLS or LLS), and held until WL clears, so
 later moves in either direction do not move it; a WL with no move of this
 IOC's behind it (left from before the IOC started) has no known side and is
-PROBLEM instead, until it clears. Three failed
+PROBLEM instead, until it clears. Once the IOC is running each axis sends
+its whole status once (an init hook), so a condition already present at
+boot (a fault, such a WL) reaches the record's alarm, which the record
+computes only when a status callback arrives. Three failed
 polls in a row also set PROBLEM; a single one is a comm error and refuses
 moves. The device stops at its stored `limit.min`/`limit.max` and rejects
 targets beyond them (`RJ BADDATA`); `FE` is a fault. Positions are the
@@ -901,8 +904,8 @@ by device id; the entity gives no default.
 
 **Latching flags.** FS, FE, FT, FQ and FB (faults: PROBLEM, the record's
 MAJOR alarm) and WL, WS, NI clear only with `warnings clear`. A put of 1 to
-`$(P)$(M):clear_warnings` (a momentary button: it reads back 0 after every
-put, so a refused put leaves no standing WRITE alarm) sends it to that axis, only with the entity's
+`$(P)$(M):clear_warnings` (a momentary button: it returns to Idle 0.5 s after
+every put, and a refused put leaves no standing WRITE alarm) sends it to that axis, only with the entity's
 `allow_clear_warnings` (off by default: it acknowledges a fault without
 fixing its cause, an operator's decision) and only from the access
 security's writer. Without it the way out is the device's own: stop the

@@ -100,6 +100,7 @@ private:
   int wlSide_;            /**< ZABER_WL_*: the side a latched WL was taken for, on the poll it appeared */
   int flagsComplete_;     /**< The flag list is the device's full one (warnings answered, or the top flag was --) */
   int stopFailed_;        /**< The last stop got no reply or a rejection: an alarm until a stop or move is acknowledged */
+  int statusSentRunning_; /**< The full status was sent once after iocInit (a fault present at boot reaches the record) */
   int firmware_;          /**< major * 100 + minor, 0 = unknown */
   int moving_;            /**< A move or home of ours is running */
   int busy_;              /**< The last reply said BUSY */

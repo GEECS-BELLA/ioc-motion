@@ -38,6 +38,7 @@
 #include <ctype.h>
 
 #include <iocsh.h>
+#include <initHooks.h>
 #include <epicsThread.h>
 #include <asynOctetSyncIO.h>
 
@@ -48,6 +49,17 @@
 #include "ZaberDriver.h"
 
 static const char *driverName = "ZaberDriver";
+
+/* Set once the IOC is running: each axis then sends its full status once, so
+ * a condition already present at boot (a fault, a WL from before the IOC)
+ * reaches the motor record's alarm, which is computed only when a status
+ * callback arrives; the poll before iocInit had no subscriber. */
+static volatile int zaberIocRunning = 0;
+
+static void zaberInitHook(initHookState state)
+{
+  if (state == initHookAfterIocRunning) zaberIocRunning = 1;
+}
 
 #define NINT(f) (long)((f) > 0 ? (f) + 0.5 : (f) - 0.5)
 
@@ -105,10 +117,10 @@ ZaberAxis* ZaberController::getAxis(int axisNo)
 
 /** The one command beyond the motor record: a put to the axis's
   * clear_warnings record sends "warnings clear" (only with allow_clear_warnings).
-  * The record is a momentary button: whatever happened (sent, refused, no
-  * reply; the IOC log says which, and the axis's :warnings shows the result),
-  * its parameter returns to 0 and the record reads that back (asyn:READBACK),
-  * so a refused put leaves no standing WRITE alarm. */
+  * The record is a momentary button (its HIGH returns it to 0, and a 0 sends
+  * nothing): whatever happened (sent, refused, no reply; the IOC log says
+  * which, and the axis's :warnings shows the result) the put succeeds, so a
+  * refused put leaves no standing WRITE alarm. */
 asynStatus ZaberController::writeInt32(asynUser *pasynUser, epicsInt32 value)
 {
   if (pasynUser->reason == ZaberClearWarnings_) {
@@ -229,7 +241,7 @@ ZaberAxis::ZaberAxis(ZaberController *pC, int axisNo)
   : asynMotorAxis(pC, axisNo),
     pC_(pC), device_(0), axis_(1), speedArgs_(0), allowHome_(0), allowUnreferenced_(0), allowClear_(0),
     powerPolicy_(ZABER_POWER_LEAVE), powerOffDelay_(0.0), identified_(0), firmware_(0), moving_(0), busy_(0),
-    idDone_(0), haveDir_(0), wlSide_(ZABER_WL_NONE), flagsComplete_(1), stopFailed_(0),
+    idDone_(0), haveDir_(0), wlSide_(ZABER_WL_NONE), flagsComplete_(1), stopFailed_(0), statusSentRunning_(0),
     homed_(0), failures_(0), backoff_(0), driverOn_(1), weDisabled_(0), lastDirPositive_(1), offPending_(0),
     lastPos_(0), nflags_(0)
 {
@@ -693,6 +705,10 @@ asynStatus ZaberAxis::poll(bool *moving)
   setIntegerParam(pC_->motorStatusHomed_, homed_);
   setIntegerParam(pC_->motorStatusPowerOn_, driverOn_);
   setIntegerParam(pC_->motorStatusCommsError_, fail);
+  if (zaberIocRunning && !statusSentRunning_) {
+    statusSentRunning_ = 1;
+    statusChanged_ = 1;                  /* the whole status, once, now that the record listens */
+  }
   callParamCallbacks();
   return failures_ >= ZABER_POLL_FAILURES ? asynError : asynSuccess;
 }
@@ -796,6 +812,7 @@ static void ZaberRegister(void)
 {
   iocshRegister(&createDef, createCallFunc);
   iocshRegister(&axisDef, axisCallFunc);
+  initHookRegister(zaberInitHook);
 }
 
 extern "C" {
