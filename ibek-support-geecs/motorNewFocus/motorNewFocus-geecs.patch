@@ -1,0 +1,425 @@
+diff --git a/newFocusApp/Db/Makefile b/newFocusApp/Db/Makefile
+index 983981d..8524325 100644
+--- a/newFocusApp/Db/Makefile
++++ b/newFocusApp/Db/Makefile
+@@ -1,5 +1,7 @@
+ TOP=../..
+ include $(TOP)/configure/CONFIG
++
++DB += NF874xMotor.db
+ #----------------------------------------
+ #  ADD MACRO DEFINITIONS AFTER THIS LINE
+ 
+diff --git a/newFocusApp/Db/NF874xMotor.db b/newFocusApp/Db/NF874xMotor.db
+new file mode 100644
+index 0000000..8e47142
+--- /dev/null
++++ b/newFocusApp/Db/NF874xMotor.db
+@@ -0,0 +1,35 @@
++# ioc-motion: one Picomotor channel of an 8742 (or of a controller on its
++# RS-485 chain) as a motor record on nf874xController (DTYP asynMotor), and
++# nothing else. Open loop: the position is the controller's step count (TP?),
++# so MRES 1 and EGU steps. RTRY 1 by default: the record compares TP? with
++# VAL after each move, and an 8742 ignores a move while any motor of that
++# controller runs (one motor at a time), so a dropped PA retries once and
++# then sets MISS; the move is absolute (UEIP 0), so a retry is idempotent.
++# RSTM Never, so the record never asks the driver to redefine the position
++# (DH) at init. DISP 1 refuses every put to the record's fields (dbPutField:
++# CA and dbpf) while the driver's status callbacks keep the readbacks live.
++record(motor, "$(P)$(M)")
++{
++	field(DESC, "$(DESC)")
++	field(DTYP, "asynMotor")
++	field(OUT,  "@asyn($(PORT),$(ADDR))")
++	field(DIR,  "$(DIR=Pos)")
++	field(VELO, "$(VELO)")
++	field(VBAS, "$(VBAS=0)")
++	field(VMAX, "$(VMAX=0)")
++	field(ACCL, "$(ACCL)")
++	field(BDST, "$(BDST=0)")
++	field(BVEL, "$(BVEL=0)")
++	field(BACC, "$(BACC=0.5)")
++	field(MRES, "$(MRES=1)")
++	field(PREC, "$(PREC=0)")
++	field(EGU,  "$(EGU=steps)")
++	field(DHLM, "$(DHLM)")
++	field(DLLM, "$(DLLM)")
++	field(RDBD, "$(RDBD=1)")
++	field(RTRY, "$(RTRY=1)")
++	field(DLY,  "$(DLY=0)")
++	field(RSTM, "Never")
++	field(TWV,  "$(TWV=10)")
++	field(DISP, "$(DISP=0)")
++}
+diff --git a/newFocusApp/src/874xMotorDriver.cpp b/newFocusApp/src/874xMotorDriver.cpp
+index ec63c07..b4adff1 100644
+--- a/newFocusApp/src/874xMotorDriver.cpp
++++ b/newFocusApp/src/874xMotorDriver.cpp
+@@ -27,6 +27,38 @@ March 4, 2011
+ #include <epicsExport.h>
+ #include "874xMotorDriver.h"
+ 
++/* ioc-motion: two switches, 1 = upstream behaviour. Set before iocInit.
++ * nf874xSetLimits: 1 (upstream) sends "<axis> SR <v>" / "<axis> SL <v>" from
++ *   setHighLimit()/setLowLimit(), which the motor record calls for every axis
++ *   at record init (its DHLM/DLLM) and on every DHLM/DLLM change; 0 keeps the
++ *   value in the driver and sends nothing (the record enforces its own limits;
++ *   SR/SL are 8743-CL closed-loop commands, absent from an 8742).
++ * nf874xHomeAllowed: 1 (upstream) sends AC, VA and "<axis> MT +/-" or
++ *   "<axis> MZ +/-" for HOMF/HOMR (8743-CL commands; an open-loop Picomotor
++ *   has no home or limit switch); 0 refuses the home with an error and sends
++ *   nothing.
++ * nf874xJogAllowed: 1 (upstream) sends AC, VA and "<axis> MV +/-" for
++ *   JOGF/JOGR, which runs until ST: an open-loop Picomotor has no switch to
++ *   end it, and a lost link leaves it running; 0 refuses the jog with an
++ *   error and sends nothing.
++ * nf874xCheckMoves: 0 (upstream) never reads the error queue, so a move the
++ *   controller ignores ("x14, MOTION IN PROGRESS": an 8742 drives one motor
++ *   at a time, manual 90066734D 3.5.5 and 6.2.1 PA/PR/MV; a refused
++ *   argument) completes in the record at the old position with no alarm;
++ *   1 drains the queue at creation (TE? until 0, at most 10) and sends TE?
++ *   after every motion command: a non-zero code fails the command and
++ *   latches the axis's problem bit (MSTA, a MAJOR STATE alarm on the
++ *   record) until a later motion command is accepted. Queries only.
++ * All four are global to the IOC. */
++volatile int nf874xSetLimits = 1;
++extern "C" {epicsExportAddress(int, nf874xSetLimits);}
++volatile int nf874xHomeAllowed = 1;
++extern "C" {epicsExportAddress(int, nf874xHomeAllowed);}
++volatile int nf874xJogAllowed = 1;
++extern "C" {epicsExportAddress(int, nf874xJogAllowed);}
++volatile int nf874xCheckMoves = 0;
++extern "C" {epicsExportAddress(int, nf874xCheckMoves);}
++
+ #define NUM_nf874x_PARAMS 3
+ 
+ static const char *driverName = "nf874xMotorDriver";
+@@ -69,11 +101,45 @@ nf874xController::nf874xController(const char *portName, const char *nf874xPortN
+   // Retrieve controller model name (8742/8743-CL)
+   // Set default control mode (open, closed) based on model
+   sprintf(this->outString_, "VE?");
+-  this->writeReadController();
+-  strncpy(modelName_, this->inString_, 9);
+-  char *spc = strchr(modelName_, ' ');
+-  *spc = '\0';
++  memset(this->inString_, 0, sizeof(this->inString_));
++  if (this->writeReadController() != asynSuccess)
++    this->inString_[0] = '\0';
++  // ioc-motion: upstream copied 9 characters without a terminator and wrote
++  // through strchr()'s result: a NULL dereference when the copy holds no
++  // space. The manual's reply ("8742 Version 1.9 11/01/12", 90066734D VE?)
++  // parses; the case that crashes is an empty or failed read (no controller
++  // at the address, a timeout), where upstream also read inString_ before
++  // anything was written to it. The buffer is zeroed and the status checked
++  // above; the model is found anywhere in the reply.
++  memset(modelName_, 0, sizeof(modelName_));
++  if (strstr(this->inString_, "8743-CL"))
++    strcpy(modelName_, "8743-CL");
++  else if (strstr(this->inString_, "8742"))
++    strcpy(modelName_, "8742");
++  asynPrint(this->pasynUserSelf, ASYN_TRACE_ERROR,
++      "%s:%s: VE? answered \"%s\": model %s\n",
++      driverName, functionName, this->inString_, modelName_[0] ? modelName_ : "unknown");
+   
++  if (nf874xCheckMoves) {
++    // Drain errors queued before this IOC (ten deep, read once each), on
++    // every controller of a chain (4 channels each; 2 on an 8743-CL is not
++    // known yet here, so a chain of 8743-CLs is drained as if of 8742s).
++    int controllers = numAxes > 4 ? (numAxes + 3) / 4 : 1;
++    for (int c = 1; c <= controllers; c++) {
++      for (int i = 0; i < 10; i++) {
++        if (controllers > 1)
++          sprintf(this->outString_, "%d>TE?", c);
++        else
++          sprintf(this->outString_, "TE?");
++        memset(this->inString_, 0, sizeof(this->inString_));
++        if (this->writeReadController() != asynSuccess) break;
++        const char *gt = strchr(this->inString_, '>');
++        if (atoi(gt ? gt + 1 : this->inString_) == 0) break;
++        asynPrint(this->pasynUserSelf, ASYN_TRACE_ERROR,
++            "%s:%s: error queued before start: %s\n", driverName, functionName, this->inString_);
++      }
++    }
++  }
+   if(strcmp(modelName_, "8743-CL") == 0)
+     hasClosedLoopSupport_ = true;
+   else
+@@ -240,6 +306,15 @@ nf874xAxis::nf874xAxis(nf874xController *pC, int axisNo)
+   : asynMotorAxis(pC, axisNo),
+     pC_(pC)
+ {
++  // ioc-motion: upstream set these on an 8743-CL only: on an 8742 poll() read
++  // lastDirection_ uninitialized before the first move (undefined behaviour,
++  // a garbage direction bit in MSTA) and home() read limitChecking_.
++  moveError_ = 0;
++  lateOwn_ = false;
++  lastDirection_ = 0;
++  encoderPosition_ = 0.0;
++  limitChecking_ = 0;
++  highLimit_ = lowLimit_ = 0.0;
+   // For daisy-chained controllers, assuming k axes per controller, and controllers number (1, 2, ...)
+   // 8742 has 4 axes per controller; 8743 with closed-loop support only has 2.
+   // Note that axis 1>3 addresses the same motor as bare 3, but response strings will be prefixed with 1>.
+@@ -296,6 +371,8 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
+   asynStatus status;
+   double targetPosition_;
+   
++  setIntegerParam(pC_->motorStatusProblem_, 0);
++  drainLateErrors();
+   sprintf(pC_->outString_, "%s AC %f", axisName_, acceleration);
+   status = pC_->writeController();
+   sprintf(pC_->outString_, "%s VA %f", axisName_, maxVelocity);
+@@ -311,6 +388,8 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
+   
+   status = pC_->writeController();
+   lastDirection_ = targetPosition_ > encoderPosition_;
++  if (status == asynSuccess)
++    status = checkMoveError(relative ? "PR" : "PA");
+   return status;
+ }
+ 
+@@ -324,6 +403,14 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
+ asynStatus nf874xAxis::home(double minVelocity, double maxVelocity, double acceleration, int forwards)
+ {
+   asynStatus status;
++
++  if (!nf874xHomeAllowed) {
++    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
++        "%s: home refused on axis %s (nf874xHomeAllowed 0): nothing sent\n",
++        driverName, axisName_);
++    latchRefusal(-2);
++    return asynError;
++  }
+   
+   sprintf(pC_->outString_, "%s AC %f", axisName_, acceleration);
+   status = pC_->writeController();
+@@ -350,10 +437,19 @@ asynStatus nf874xAxis::moveVelocity(double minVelocity, double maxVelocity, doub
+   double speed=maxVelocity;
+   int forwards=1;
+ 
++  if (!nf874xJogAllowed) {
++    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
++        "%s: jog refused on axis %s (nf874xJogAllowed 0): nothing sent\n",
++        driverName, axisName_);
++    latchRefusal(-3);
++    return asynError;
++  }
+   if (speed < 0) {
+     speed = -speed;
+     forwards = 0;
+   }
++  setIntegerParam(pC_->motorStatusProblem_, 0);
++  drainLateErrors();
+   sprintf(pC_->outString_, "%s AC %f", axisName_, acceleration);
+   status = pC_->writeController();
+   sprintf(pC_->outString_, "%s VA %f", axisName_, speed);
+@@ -361,6 +457,8 @@ asynStatus nf874xAxis::moveVelocity(double minVelocity, double maxVelocity, doub
+   sprintf(pC_->outString_, "%s MV %s", axisName_, forwards ? "+" : "-");
+   status = pC_->writeController();
+   lastDirection_ = forwards;
++  if (status == asynSuccess)
++    status = checkMoveError("MV");
+   return status;
+ }
+ 
+@@ -444,9 +542,11 @@ asynStatus nf874xAxis::doMoveToHome()
+ asynStatus nf874xAxis::setHighLimit(double highLimit) {
+   asynStatus status;
+ 
++  highLimit_ = highLimit;
++  if (!nf874xSetLimits)
++    return asynSuccess;
+   sprintf(pC_->outString_, "%s SR %f", axisName_, highLimit);
+   status = pC_->writeController();
+-  highLimit_ = highLimit;
+   return status;
+ }
+ 
+@@ -456,9 +556,11 @@ asynStatus nf874xAxis::setHighLimit(double highLimit) {
+ asynStatus nf874xAxis::setLowLimit(double lowLimit) {
+   asynStatus status;
+ 
++  lowLimit_ = lowLimit;
++  if (!nf874xSetLimits)
++    return asynSuccess;
+   sprintf(pC_->outString_, "%s SL %f", axisName_, lowLimit);
+   status = pC_->writeController();
+-  lowLimit_ = lowLimit;
+   return status;
+ }
+ 
+@@ -471,7 +573,7 @@ asynStatus nf874xAxis::setLowLimit(double lowLimit) {
+   * \param[out] moving A flag that is set indicating that the axis is moving (1) or done (0). */
+ asynStatus nf874xAxis::poll(bool *moving)
+ { 
+-  int done;
++  int done = 1;
+   asynStatus comStatus;
+   static const char *functionName = "poll";
+ 
+@@ -565,11 +667,123 @@ asynStatus nf874xAxis::poll(bool *moving)
+         driverName, functionName, comStatus);
+   }
+   
+-  setIntegerParam(pC_->motorStatusProblem_, comStatus ? 1 : 0);
++  // ioc-motion: a latched code shows only once the axis reads done, so the
++  // record never sees RA_PROBLEM (which it takes as stopped) mid-move.
++  setIntegerParam(pC_->motorStatusProblem_, (comStatus || (moveError_ && done)) ? 1 : 0);
+   callParamCallbacks();
+   return comStatus ? asynError : asynSuccess;
+ }
+ 
++/** ioc-motion: with nf874xCheckMoves, the controller's error queue is read
++  * before a motion command (drainLateErrors) and after it (checkMoveError),
++  * TE? until 0, at most ten each, through the axis's controller prefix on a
++  * chain. Every code is charged to the axis it belongs to (chargeCode):
++  * - x14, MOTION IN PROGRESS, read after this axis's command: this axis (its
++  *   x names the channel that was moving, not the one commanded: 1>114 for a
++  *   1>2 command, U_BlueDiodePicos 2026-10-30);
++  * - any other channel code x01..x99: channel x's axis on this controller
++  *   (x08 arrives late, after the TE? that follows the move, so a code read
++  *   here may be another axis's or this axis's previous attempt's);
++  * - a general code (0-99) read after this axis's command: this axis; read
++  *   before it: logged only.
++  * A code charged to an axis latches its moveError_ (and lateOwn_ when it is
++  * read outside that axis's own post-command TE?, so that axis's next
++  * accepted command does not clear it); poll() shows the latch as the problem
++  * bit only once the axis reads done, so DMOV never goes to 1 mid-move. */
++void nf874xAxis::chargeCode(int ctl, int code, bool afterOwnCommand, bool *failsThis)
++{
++  int ch = code / 100;
++  int kind = code % 100;
++  nf874xAxis *owner = NULL;
++  if (ch == 0) {
++    owner = afterOwnCommand ? this : NULL;
++  } else if (kind == 14 && afterOwnCommand) {
++    owner = this;
++  } else if (ch >= 1 && ch <= 4) {
++    owner = pC_->getAxis(ctl ? (ctl - 1) * 4 + ch : ch);
++  }
++  asynPrint(pasynUser_, ASYN_TRACE_ERROR,
++      "%s: %s a command on %s: TE? %d, charged to %s\n", driverName,
++      afterOwnCommand ? "after" : "before", axisName_, code,
++      owner ? owner->axisName_ : "no axis (logged)");
++  if (!owner)
++    return;
++  owner->moveError_ = code;
++  if (owner == this && afterOwnCommand) {
++    if (failsThis) *failsThis = true;
++  } else {
++    owner->lateOwn_ = true;
++  }
++  if (owner != this)
++    owner->callParamCallbacks();
++}
++
++/** Read the queue to 0 (at most ten), charging each code. */
++asynStatus nf874xAxis::readQueue(bool afterOwnCommand, bool *failsThis)
++{
++  const char *gt = strchr(axisName_, '>');
++  int ctl = gt ? atoi(axisName_) : 0;
++  for (int i = 0; i < 10; i++) {
++    if (gt)
++      sprintf(pC_->outString_, "%d>TE?", ctl);
++    else
++      sprintf(pC_->outString_, "TE?");
++    memset(pC_->inString_, 0, sizeof(pC_->inString_));
++    asynStatus status = pC_->writeReadController();
++    if (status != asynSuccess)
++      return status;
++    const char *r = strchr(pC_->inString_, '>');
++    int code = atoi(r ? r + 1 : pC_->inString_);
++    if (code == 0)
++      return asynSuccess;
++    chargeCode(ctl, code, afterOwnCommand, failsThis);
++  }
++  return asynSuccess;
++}
++
++void nf874xAxis::drainLateErrors()
++{
++  if (!nf874xCheckMoves)
++    return;
++  readQueue(false, NULL);
++}
++
++asynStatus nf874xAxis::checkMoveError(const char *what)
++{
++  if (!nf874xCheckMoves)
++    return asynSuccess;
++  bool failed = false;
++  asynStatus status = readQueue(true, &failed);
++  bool keep = lateOwn_;
++  lateOwn_ = false;
++  if (status != asynSuccess) {
++    moveError_ = -1;
++    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
++        "%s: axis %s: no reply to TE? after %s\n", driverName, axisName_, what);
++    return status;
++  }
++  if (failed) {
++    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
++        "%s: axis %s: %s refused (TE? %d), latched until a later command is taken\n",
++        driverName, axisName_, what, moveError_);
++    return asynError;
++  }
++  // Taken. A code of this axis's own read outside its post-command TE? (an
++  // empty channel's late x08 from the previous attempt) keeps the latch
++  // through this command; otherwise the latch clears.
++  if (!keep)
++    moveError_ = 0;
++  return asynSuccess;
++}
++
++/** A refused command (home or jog switched off): latched like a refused move,
++  * so the record shows it (MAJOR) once the axis reads done. */
++void nf874xAxis::latchRefusal(int why)
++{
++  moveError_ = why;
++  lateOwn_ = false;
++}
++
+ /** Set the updating interval for closed-loop correction.
+   * \param[in] interval Time in seconds between static position regulation
+   */
+diff --git a/newFocusApp/src/874xMotorDriver.h b/newFocusApp/src/874xMotorDriver.h
+index 8d45846..09ca9aa 100644
+--- a/newFocusApp/src/874xMotorDriver.h
++++ b/newFocusApp/src/874xMotorDriver.h
+@@ -40,6 +40,11 @@ public:
+   asynStatus setUpdateInterval(double interval);
+   asynStatus setDeadband(int deadband);
+   asynStatus setFollowingError(int threshold);
++  asynStatus checkMoveError(const char *what);  /* ioc-motion */
++  void drainLateErrors();                      /* ioc-motion */
++  asynStatus readQueue(bool afterOwnCommand, bool *failsThis);  /* ioc-motion */
++  void chargeCode(int ctl, int code, bool afterOwnCommand, bool *failsThis);  /* ioc-motion */
++  void latchRefusal(int why);                  /* ioc-motion */
+ 
+ private:
+   nf874xController *pC_;        /**< Pointer to the asynMotorController to which this axis belongs.
+@@ -54,7 +59,9 @@ private:
+   double lowLimit_;             /**< Value of negative direction hardware limit set */
+   double updateInterval_;       /**< Time in seconds of closed-loop update interval */
+   double deadband_;             /**< Positioning range for avoiding limit cycling */
+-  double followingError_;       /**< Maximum allowed tracking error threshold */ 
++  double followingError_;       /**< Maximum allowed tracking error threshold */
++  int    moveError_;            /**< ioc-motion: last TE? code after a motion command, latched */
++  bool   lateOwn_;              /**< ioc-motion: a late code of this axis's own read before this command */
+ 
+ friend class nf874xController;
+ };
+diff --git a/newFocusApp/src/devNewFocus.dbd b/newFocusApp/src/devNewFocus.dbd
+index d9c6e6e..b2046a3 100644
+--- a/newFocusApp/src/devNewFocus.dbd
++++ b/newFocusApp/src/devNewFocus.dbd
+@@ -6,4 +6,9 @@ variable(drvPMNC87xxdebug)
+ 
+ # NewFocus 874x controller support
+ registrar(nf874xMotorRegister)
++# ioc-motion: the four switches in 874xMotorDriver.cpp (iocsh var needs these lines)
++variable(nf874xSetLimits, int)
++variable(nf874xHomeAllowed, int)
++variable(nf874xJogAllowed, int)
++variable(nf874xCheckMoves, int)
+ 

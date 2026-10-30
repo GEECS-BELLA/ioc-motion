@@ -3,7 +3,9 @@
 The motion-controller image of GEECS-BELLA's native EPICS IOCs: the motor
 record on epics-containers' `ioc-motorsim` developer image (motor R7-4,
 asyn, autosave, motorSim, ...) plus `epics-motor/motorNewport` R1-3 (ESP300
-family, SMC100, Agilis AG-UC8) and `epics-motor/motorAerotech` R1-1-1 (the Ensemble driver),
+family, SMC100, Agilis AG-UC8), `epics-motor/motorAerotech` R1-1-1 (the Ensemble driver),
+`epics-motor/motorPIGCS2` R1-3-1 (PI's old "Hexapod" controller),
+`epics-motor/motorNewFocus` at master 0f86a5b (the NewFocus 8742 Picomotor),
 our `motorVelmex` (the Velmex VXM + VRO driver, README "Velmex VXM + VRO"),
 and `geecsSerial.Port`, the one serial-line entity every serial device
 takes (local tty, raw TCP, RFC 2217: geecs-epics decision 15).
@@ -22,7 +24,9 @@ Details, the patch and the driver's gaps: `README.md`.
   htu-linux-camserv1, profile `bench-ag`); `zabertest1` (Zaber ASCII daisy
   chain `U_Zaber`, stages on a Digi port over RFC 2217, profile
   `bench-zaber`) and its fake twin `zabertest1-sim`, on this repo's
-  `feat/zaber-ascii` until a tag.
+  `feat/zaber-ascii` until a tag; `pmtest1` (NewFocus 8742 x2
+  `U_BlueDiodePicos`, USB through geecs-epics' shim on htu-linux-camserv1,
+  profile `bench-pm`) and its fake twin `pmtest1-sim`.
 - **Why ours.** No epics-containers image carries motorNewport (TAU
   Systems' `ioc-motornewport` is tier 2, reference only: geecs-epics
   decision 10). The other motor families geecs-epics' device catalogue
@@ -53,6 +57,17 @@ Details, the patch and the driver's gaps: `README.md`.
   upstream; `on_for_move`; `keep_on`), `power_on_delay`, `power_off_delay`
   (README "Aerotech Ensemble", "Power policy"; proven on the controller 2026-10-29).
   The `EnsembleAxis` entity renders `UEIP` Yes (RBV from the encoder) and `RDBD`.
+  `ibek-support-geecs/motorNewFocus/motorNewFocus-geecs.patch`: iocsh
+  variables `nf874xSetLimits`, `nf874xHomeAllowed`, `nf874xJogAllowed` (C
+  default 1, upstream: the record's DHLM/DLLM sent as the 8743-CL's SR/SL at
+  every init; HOMF/HOMR send MT/MZ; JOGF/JOGR send an unbounded MV) and
+  `nf874xCheckMoves` (C default 0, upstream: the error queue is never read, so
+  a move the 8742 ignores ends silently); the `NF874xController` entity's
+  `set_limits` / `home_allowed` / `jog_allowed` default to false and
+  `check_moves` to true (every queued code charged to its own channel's
+  axis, shown only once that axis reads done); plus the `VE?` read fix (an
+  empty reply), the 8742 axis members (undefined behaviour) and
+  `NF874xMotor.db` (RTRY 1; README "NewFocus 8742 Picomotor").
 - **Images.** CI publishes on a git tag, CalVer `YYYY.M.N` (`2026.10.1`;
   never re-push a tag): `ghcr.io/geecs-bella/ioc-motion-runtime:<tag>` (what hosts
   pull, no credentials) and `-developer` (the release job runs in it; a build
