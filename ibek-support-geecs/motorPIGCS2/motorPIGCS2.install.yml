@@ -30,7 +30,9 @@ libs:
 # and the fixes: getStatus reporting the servo state it knows (upstream leaves
 # it uninitialized), counts rounded, the axis's asynUser set, INI without an
 # axis identifier, the aggregate status parameter kept (MSTA at init), #4 read
-# every poll for the controller-level records, no MOV while not referenced. It
+# every poll for the controller-level records, no MOV while not referenced,
+# *IDN? asked once more when the first goes unanswered, an empty reply no
+# longer indexing the byte before the buffer in sendAndReceive. It
 # also adds pigcs2App/Db/PIHexapodMotor.db (RSTM Never, RTRY 0, DISP) and
 # PIHexapodCtrl.db (DEFER, STATUS_WORD, REFERENCED, INITIALISING, STATE, INIT,
 # the pivot readbacks, LAST_ERR).
