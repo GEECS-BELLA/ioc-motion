@@ -241,8 +241,9 @@ ZaberAxis::ZaberAxis(ZaberController *pC, int axisNo)
   : asynMotorAxis(pC, axisNo),
     pC_(pC), device_(0), axis_(1), speedArgs_(0), allowHome_(0), allowUnreferenced_(0), allowClear_(0),
     powerPolicy_(ZABER_POWER_LEAVE), powerOffDelay_(0.0), identified_(0), firmware_(0), moving_(0), busy_(0),
-    idDone_(0), haveDir_(0), wlSide_(ZABER_WL_NONE), flagsComplete_(1), stopFailed_(0), statusSentRunning_(0),
+    idDone_(0), idPasses_(0), wlSide_(ZABER_WL_NONE), flagsComplete_(1), stopFailed_(0), statusSentRunning_(0),
     homed_(0), failures_(0), backoff_(0), driverOn_(1), weDisabled_(0), lastDirPositive_(1), offPending_(0),
+    offFailures_(0), settling_(0),
     lastPos_(0), nflags_(0)
 {
   setIntegerParam(pC_->motorStatusHasEncoder_, 0);
@@ -350,6 +351,15 @@ void ZaberAxis::identify()
     pC_->setDoubleParam(axisNo_, pC_->ZaberLimitMin_, strtod(r.data, NULL));
   if (idRead(ZABER_ID_LIMIT_MAX, &r, "get limit.max", NULL, 0))
     pC_->setDoubleParam(axisNo_, pC_->ZaberLimitMax_, strtod(r.data, NULL));
+  /* A device that answers get pos but never one setting would cost every poll
+   * a timeout for ever: after ZABER_ID_PASSES passes the rest are given up
+   * (their records stay 0) with a message. */
+  if (idDone_ != ZABER_ID_ALL && ++idPasses_ >= ZABER_ID_PASSES) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+              "%s:identify: device %d axis %d: identity reads 0x%02x unanswered after %d passes: given up (their records stay 0)\n",
+              driverName, device_, axis_, ZABER_ID_ALL & ~idDone_, idPasses_);
+    idDone_ = ZABER_ID_ALL;
+  }
   identified_ = (idDone_ == ZABER_ID_ALL);
 }
 
@@ -527,7 +537,8 @@ asynStatus ZaberAxis::move(double position, int relative, double minVelocity, do
   }
   moving_ = 1;
   busy_ = 1;
-  haveDir_ = 1;
+  offPending_ = 0;                       /* a new move: the last one's power-off and settle are moot */
+  settling_ = 0;
   setStopFailed(0);
   lastDirPositive_ = target >= lastPos_ ? 1 : 0;
   setIntegerParam(pC_->motorStatusDirection_, lastDirPositive_);
@@ -571,7 +582,8 @@ asynStatus ZaberAxis::home(double minVelocity, double maxVelocity, double accele
   }
   moving_ = 1;
   busy_ = 1;
-  haveDir_ = 1;
+  offPending_ = 0;
+  settling_ = 0;
   setStopFailed(0);
   lastDirPositive_ = 0;                  /* toward the motor end */
   setIntegerParam(pC_->motorStatusDone_, 0);
@@ -628,6 +640,8 @@ asynStatus ZaberAxis::poll(bool *moving)
 
   if (!device_) { *moving = false; return asynSuccess; }
 
+  epicsTimeStamp readAt;                 /* when this poll's position was asked for */
+  epicsTimeGetCurrent(&readAt);
   if (backoff_ > 0) {
     /* A silent axis is asked once per ZABER_BACKOFF_POLLS polls, so it does
      * not hold the line (and every other axis's poll, stop or move) for a
@@ -665,35 +679,57 @@ asynStatus ZaberAxis::poll(bool *moving)
     homed_ = !(hasFlag("WR") || hasFlag("WH"));
     driverOn_ = !(hasFlag("FO") || hasFlag("FD"));
     /* WL: a limit sensor interrupted a move; it latches until warnings clear.
-     * Its side is taken once, on the poll where WL first appears, from the
-     * move or home of ours that was running then, and held until WL clears:
-     * later moves do not move it. A WL with no move of ours behind it (left
-     * from before this IOC started) has no known side: PROBLEM, not a guessed
-     * limit, until it clears. */
+     * Its side is taken once, on the poll where WL first appears, and only from
+     * a move or home of ours that was running then (still moving_ on the poll
+     * that ends it, before the power-off below), and held until WL clears:
+     * later moves do not move it. Any other WL (the knob, another client, one
+     * left from before this IOC started) has no known side: PROBLEM, not a
+     * guessed limit, until it clears. */
     if (!hasFlag("WL")) {
       wlSide_ = ZABER_WL_NONE;
     } else if (wlSide_ == ZABER_WL_NONE) {
-      wlSide_ = !haveDir_ ? ZABER_WL_UNKNOWN : (lastDirPositive_ ? ZABER_WL_HIGH : ZABER_WL_LOW);
+      int ours = moving_ && !offPending_ && !settling_;
+      wlSide_ = !ours ? ZABER_WL_UNKNOWN : (lastDirPositive_ ? ZABER_WL_HIGH : ZABER_WL_LOW);
     }
     setIntegerParam(pC_->motorStatusHighLimit_, wlSide_ == ZABER_WL_HIGH);
     setIntegerParam(pC_->motorStatusLowLimit_, wlSide_ == ZABER_WL_LOW);
     if (wlSide_ == ZABER_WL_UNKNOWN) problem = 1;
     if (!busy_) setStopFailed(0);        /* at rest: the stop question is settled */
-    if (moving_ && !busy_) {
+
+    /* The end of a move. Under leave: done when the device is IDLE. Under
+     * on_for_move (as motorAerotech's power policy): still not done (DMOV 0)
+     * until the driver disable is acknowledged and a position has been read
+     * ZABER_SETTLE_S after it, because with its driver off a stage's position
+     * changes (U_Zaber's m1: +10, +32 microsteps, 2026-10-30): a client
+     * acquiring on DMOV then sees where the stage rests. */
+    if (moving_ && !busy_ && !offPending_ && !settling_) {
+      if (powerPolicy_ == ZABER_POWER_ON_FOR_MOVE) { scheduleOff(powerOffDelay_); offFailures_ = 0; }
+      else moving_ = 0;
+    }
+    if (settling_ && !busy_ && epicsTimeDiffInSeconds(&readAt, &settleAt_) >= 0) {
+      settling_ = 0;                     /* this poll's position was read after the settle time */
       moving_ = 0;
-      if (powerPolicy_ == ZABER_POWER_ON_FOR_MOVE) scheduleOff(powerOffDelay_);
     }
     if (offPending_ && !busy_) {
       epicsTimeStamp now;
       epicsTimeGetCurrent(&now);
       if (epicsTimeDiffInSeconds(&now, &offAt_) >= 0) {
         ZaberReply d;
-        offPending_ = 0;
         if (cmd("driver disable", &d) == asynSuccess && d.ok) {
+          offPending_ = 0;
           weDisabled_ = 1;
+          settling_ = 1;
+          epicsTimeGetCurrent(&settleAt_);
+          epicsTimeAddSeconds(&settleAt_, ZABER_SETTLE_S);
+        } else if (++offFailures_ >= ZABER_OFF_TRIES) {
+          offPending_ = 0;
+          moving_ = 0;
+          asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+                    "%s:poll: device %d axis %d: driver disable failed %d times: move reported done, driver left on\n",
+                    driverName, device_, axis_, offFailures_);
         } else {
-          asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:poll: device %d axis %d: driver disable failed\n",
-                    driverName, device_, axis_);
+          asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:poll: device %d axis %d: driver disable failed (try %d)\n",
+                    driverName, device_, axis_, offFailures_);
         }
       }
     }

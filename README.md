@@ -1073,7 +1073,10 @@ verify is dropped. After an axis's first answered `get pos`: `get version`,
 later polls until it answers (a stage off or slow at boot is identified
 when it answers), then each other read retried until the device answers
 it, OK or RJ (a rejection is an answer: the setting is absent on that
-firmware), so one dropped reply at boot does not leave its record at 0. `ZaberAxisConfig` runs one poll before iocInit, so the record
+firmware), so one dropped reply at boot does not leave its record at 0;
+after three passes a read still unanswered is given up with a message (its
+record stays 0), so a device that never answers one setting does not cost
+every poll a timeout. `ZaberAxisConfig` runs one poll before iocInit, so the record
 starts from the real position. Every poll: `get pos` (the position, IDLE or
 BUSY, the top warning flag), and `warnings` (the full list, a read) when
 that flag is not `--`. An axis that has not answered three polls in a row is
@@ -1112,7 +1115,14 @@ it. `home` only with `allow_home` (toward the motor end at the device's
 `limit.approach.maxspeed`; it sets the reference, so it is accepted under
 WR). `power_policy: on_for_move` sends `driver enable` before each move or
 home and `driver disable` `power_off_delay` s after it ends (the LabVIEW
-driver's `automotoroff`).
+driver's `automotoroff`), and, as motorAerotech's power policy does, holds
+DONE (the record's DMOV) at 0 until that disable is acknowledged and a
+position has been read 0.5 s after it: with its driver off a stage's
+position changes (U_Zaber's m1 read +10 and +32 microsteps after the
+disable, 2026-10-30; the mechanism is not established), so a client that
+acquires on DMOV sees where the stage rests. A disable that gets no OK is
+tried three times, then the move is reported done with the driver left on
+(a message; POWERED shows it).
 
 **Status.** DONE = not BUSY. HOMED = neither `WR` nor `WH` (homed, but not
 to the reference its calibration expects). PROBLEM = any fault flag
@@ -1124,14 +1134,17 @@ Driver Disabled in 7.10 and below", the flag a `driver disable` raised
 there, so on 7.10 and below a driver some other client turned off reads as
 a fault. POWERED = no `FO` or `FD`. `WL` (a limit sensor interrupted a
 move; it latches until `warnings clear`) is the record's limit on one side,
-taken once on the poll where WL first appears, from the move or home of
-this IOC's that was running then (HLS or LLS), and held until WL clears, so
-later moves in either direction do not move it; like a switch, it refuses a
-move further toward its side (nothing sent: the record, seeing the limit in
-the direction of motion, would abandon the move it had just sent and leave
-VAL behind the stage) and allows a move away; a WL with no move of this
-IOC's behind it (left from before the IOC started) has no known side and is
-PROBLEM instead, until it clears. Once the IOC is running each axis sends
+taken once on the poll where WL first appears and only from a move or home
+of this IOC's running then (HLS or LLS), and held until WL clears, so later
+moves in either direction do not move it; like a switch, it refuses a move
+further toward its side from wherever the stage is (nothing sent: the record,
+seeing the limit in the direction of motion, would abandon the move it had
+just sent and leave VAL behind the stage) and allows a move away, so after
+backing off, a move back the way the limit was is refused until the WL is
+cleared (`clear_warnings` with `allow_clear_warnings`, or on the device with
+the IOC stopped); any other WL (the knob, another client, one left from
+before the IOC started) has no known side and is PROBLEM instead, until it
+clears. Once the IOC is running each axis sends
 its whole status once (an init hook), so a condition already present at
 boot (a fault, such a WL) reaches the record's alarm, which the record
 computes only when a status callback arrives. Three failed

@@ -26,6 +26,9 @@
 #define ZABER_MAX_LINES 8            /* lines read for one reply: alerts (!), info (#) and stale replies are skipped */
 #define ZABER_POLL_FAILURES 3        /* consecutive failed polls before the record sees a problem */
 #define ZABER_BACKOFF_POLLS 10       /* after ZABER_POLL_FAILURES, a silent axis is asked once per this many polls */
+#define ZABER_ID_PASSES 3            /* identity passes before an unanswered read is given up (its record stays 0) */
+#define ZABER_SETTLE_S 0.5           /* on_for_move: s after the driver disable is acknowledged before the position is read as final */
+#define ZABER_OFF_TRIES 3            /* driver disables without an OK before the move is reported done anyway (driver left on) */
 #define ZABER_SPEED_ARGS_FW 725      /* move abs <pos> <speed> <accel>: firmware 7.25 and up */
 #define ZABER_VELOCITY_DATA 1.6384   /* velocity data = microsteps/s x 1.6384 (protocol manual) */
 #define ZABER_ACCEL_DATA (1.6384 / 10000.0)   /* accel data = microsteps/s^2 x 1.6384 / 10000 */
@@ -96,8 +99,8 @@ private:
   double powerOffDelay_;  /**< s after a move ends before "driver disable" (on_for_move) */
   int identified_;        /**< get version answered and every identity read in idDone_ */
   int idDone_;            /**< ZABER_ID_* bits: the identity reads the device has answered */
-  int haveDir_;           /**< A move or home of ours has run since the IOC started */
-  int wlSide_;            /**< ZABER_WL_*: the side a latched WL was taken for, on the poll it appeared */
+  int idPasses_;          /**< identify() passes since get version answered; reads still unanswered after ZABER_ID_PASSES are given up */
+  int wlSide_;           /**< ZABER_WL_*: the side a latched WL was taken for, on the poll it appeared */
   int flagsComplete_;     /**< The flag list is the device's full one (warnings answered, or the top flag was --) */
   int stopFailed_;        /**< The last stop got no reply or a rejection: an alarm until a stop or move is acknowledged */
   int statusSentRunning_; /**< The full status was sent once after iocInit (a fault present at boot reaches the record) */
@@ -112,6 +115,9 @@ private:
   int lastDirPositive_;   /**< The direction of the last move or home of ours (a WL is on that side) */
   int offPending_;        /**< on_for_move: a driver disable is due at offAt_ */
   epicsTimeStamp offAt_;
+  int offFailures_;       /**< Consecutive driver disables that got no OK */
+  int settling_;          /**< on_for_move: the driver disable was acknowledged; done once a position read at or after settleAt_ */
+  epicsTimeStamp settleAt_;
   long lastPos_;
   char flags_[ZABER_MAX_FLAGS][3];
   int nflags_;
