@@ -593,8 +593,8 @@ warns that a motion started by `INI` may not be stoppable by `#24`.
 
 ### What the stock driver sends, and the patch
 
-Creation: `*IDN?`, `VEL?` (the controller knows it, so the driver sends
-velocities), `#4` and, with `pos_with_char3`, `#3` (this controller answers
+Creation: `*IDN?` (asked once more when the first goes unanswered: the fixes
+below), `VEL?` (the controller knows it, so the driver sends velocities), `#4` and, with `pos_with_char3`, `#3` (this controller answers
 `#3` with six lines, which upstream's single-byte read cannot take: see the
 gaps; our entities never send it), `SPI?
 RST`; then per axis **`SVO <axis> 1`** (a write), `VEL? <axis>`, `POS?
@@ -627,6 +627,8 @@ below the line:
 | position counts | `int(x + 0.5)`: truncation toward zero reads -0.46 as -0.4599 | rounded to nearest (fix, no switch) |
 | target counts | the record's counts (a double, 17.7 / 1e-4 = 176999.99999999997) truncated to int in `move` and in the deferred-move array: `MOV Y 17.699900` for a 17.7 target | rounded to nearest (fix, no switch) |
 | `PIasynAxis::m_pasynUser` | never set: a null write on upstream's own `INI` failure path | set from the axis's asynUser at construction, so the refusal paths print to the IOC log instead of dereferencing NULL (the record never sees the message) (fix, no switch) |
+| `*IDN?` at creation | asked once; unanswered, the IOC comes up with no controller and every record dead until a restart. The first command on a line that has just opened can be lost: a serial server still negotiating RFC 2217 swallowed it on the bench, 2026-10-29 | asked once more after a timeout or an empty answer, with a line in the IOC log (`no answer to *IDN? ... asking once more`); then as upstream (fix, no switch) |
+| an empty reply in `PIInterface::sendAndReceive` | the continuation test indexes the byte before the buffer (`inputBuff[strlen(inputBuff)-1]` on an empty string, a timeout) | guarded, both overloads (fix, no switch) |
 
 `PIHexapodController`'s `init_servo`, `home_allowed`, `vmo_check`,
 `send_velocity`, `pos_with_char3`, `jog_allowed`, `set_position_allowed` and
