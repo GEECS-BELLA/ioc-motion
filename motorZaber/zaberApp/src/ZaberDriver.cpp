@@ -3,23 +3,32 @@
  * Zaber ASCII devices as an asynMotorController. See ZaberDriver.h and
  * ioc-motion's README, "Zaber (ASCII)".
  *
- * What goes down the line (Zaber ASCII protocol manual), every command
- * addressed to one device and one axis, "/<device> <axis> <command>" + LF;
- * never the broadcast address 0, never "set", "renumber" or "system ...":
+ * What goes down the line (Zaber ASCII protocol manuals), every command
+ * addressed to one device and one axis with a message id,
+ * "/<device> <axis> <id> <command>" + LF; never the broadcast address 0,
+ * never "set", "renumber" or "system ...":
  *   creation:            nothing
- *   once per axis:       get version, get deviceid (device.id if rejected),
+ *   once per axis, after its first answered get pos, retried until get
+ *   version answers:     get version, get deviceid (device.id if rejected),
  *                        get system.serial (device scope, axis 0);
- *                        get peripheralid (peripheral.id), get maxspeed,
- *                        get limit.min, get limit.max (axis scope)
+ *                        get peripheralid (peripheral.id), get resolution,
+ *                        get maxspeed, get limit.min, get limit.max (axis)
  *   every poll:          get pos; and warnings (the full flag list, a read)
- *                        when the reply's top flag is not "--"
- *   writes:              move abs <pos> [<speed> <accel>] (a move);
- *                        stop (only to a BUSY axis); home (only with
- *                        allow_home); driver enable / driver disable (only
- *                        with power_policy on_for_move)
- * A reply is "@<dd> <a> OK|RJ IDLE|BUSY <flag> <data>" CR LF; alerts ("!")
- * and info lines ("#") are skipped, and a reply from another address or axis
- * is skipped too.
+ *                        when the reply's top flag is not "--". An axis
+ *                        silent for ZABER_POLL_FAILURES polls is asked only
+ *                        once per ZABER_BACKOFF_POLLS polls
+ *   writes:              move abs <pos> [<speed> <accel>] (a move; refused
+ *                        while WR unless allow_unreferenced);
+ *                        stop (always, unless a fresh valid reply says IDLE);
+ *                        home (only with allow_home); driver enable /
+ *                        driver disable (only with power_policy on_for_move);
+ *                        warnings clear (only with allow_clear_warnings, on
+ *                        a put to the axis's clear_warnings record)
+ * A reply is "@<dd> <a> <id> OK|RJ IDLE|BUSY <flag> <data>[:CC]" CR LF. Only
+ * the reply with this command's address, axis and id is taken: alerts ("!"),
+ * info lines ("#"), another address's reply and a late reply to an earlier
+ * command (another id) are skipped, and a line whose checksum (LRC, sent
+ * when comm.checksum is 1) does not verify is dropped.
  */
 
 #include <stdio.h>
@@ -53,7 +62,8 @@ ZaberController::ZaberController(const char *portName, const char *serialPortNam
                                  double movingPollPeriod, double idlePollPeriod)
   : asynMotorController(portName, numAxes, NUM_ZABER_PARAMS,
                         asynOctetMask, asynOctetMask,
-                        ASYN_CANBLOCK | ASYN_MULTIDEVICE, 1, 0, 0)
+                        ASYN_CANBLOCK | ASYN_MULTIDEVICE, 1, 0, 0),
+    nextId_(0)
 {
   createParam(ZaberFlagString, asynParamOctet, &ZaberFlag_);
   createParam(ZaberWarningsString, asynParamOctet, &ZaberWarnings_);
@@ -64,6 +74,8 @@ ZaberController::ZaberController(const char *portName, const char *serialPortNam
   createParam(ZaberMaxspeedString, asynParamFloat64, &ZaberMaxspeed_);
   createParam(ZaberLimitMinString, asynParamFloat64, &ZaberLimitMin_);
   createParam(ZaberLimitMaxString, asynParamFloat64, &ZaberLimitMax_);
+  createParam(ZaberResolutionString, asynParamInt32, &ZaberResolution_);
+  createParam(ZaberClearWarningsString, asynParamInt32, &ZaberClearWarnings_);
 
   if (pasynOctetSyncIO->connect(serialPortName, 0, &pasynUserController_, NULL)) {
     asynPrint(pasynUserSelf, ASYN_TRACE_ERROR, "%s: cannot connect to serial port %s\n",
@@ -90,31 +102,89 @@ ZaberAxis* ZaberController::getAxis(int axisNo)
   return static_cast<ZaberAxis*>(asynMotorController::getAxis(axisNo));
 }
 
-/** Parse one line; 1 if it is a reply ("@..."), 0 otherwise. */
-static int parseReply(const char *line, ZaberReply *r)
+/** The one command beyond the motor record: a put to the axis's
+  * clear_warnings record sends "warnings clear" (only with allow_clear_warnings). */
+asynStatus ZaberController::writeInt32(asynUser *pasynUser, epicsInt32 value)
 {
-  char okWord[4], statusWord[6], flag[4];
-  int consumed = 0;
-  if (line[0] != '@') return 0;
-  if (sscanf(line, "@%d %d %3s %5s %3s %n", &r->device, &r->axis, okWord, statusWord, flag, &consumed) < 5)
-    return 0;
-  if (strcmp(okWord, "OK") && strcmp(okWord, "RJ")) return 0;      /* a message id would sit here: we send none */
-  if (strcmp(statusWord, "IDLE") && strcmp(statusWord, "BUSY")) return 0;
-  if (strlen(flag) != 2) return 0;
-  r->ok = !strcmp(okWord, "OK");
-  r->busy = !strcmp(statusWord, "BUSY");
-  strcpy(r->flag, flag);
-  snprintf(r->data, sizeof(r->data), "%s", consumed ? line + consumed : "");
-  /* the checksum (":CC", comm.checksum 1) is not ours to enable; drop one if present */
-  char *colon = strrchr(r->data, ':');
-  if (colon && strlen(colon) == 3) *colon = '\0';
-  for (size_t n = strlen(r->data); n > 0 && isspace((unsigned char)r->data[n - 1]); n--) r->data[n - 1] = '\0';
+  if (pasynUser->reason == ZaberClearWarnings_) {
+    ZaberAxis *pAxis = getAxis(pasynUser);
+    if (!pAxis) return asynError;
+    setIntegerParam(pAxis->axisNo_, ZaberClearWarnings_, 0);
+    if (!value) return asynSuccess;
+    return pAxis->clearWarnings();
+  }
+  return asynMotorController::writeInt32(pasynUser, value);
+}
+
+/** The LRC checksum: the 8-bit sum of the bytes after the message type up to
+  * the colon, plus the checksum itself, is 0 (protocol manual, Checksumming). */
+static int checksumOk(const char *line, const char *colon)
+{
+  unsigned sum = 0;
+  for (const char *p = line + 1; p < colon; p++) sum += (unsigned char)*p;
+  char *end;
+  unsigned long cc = strtoul(colon + 1, &end, 16);
+  if (end != colon + 3) return 0;
+  return ((sum + cc) & 0xFF) == 0;
+}
+
+/** The next space-delimited word of *p, terminated in place; NULL at the end. */
+static char *word(char **p)
+{
+  while (**p == ' ') (*p)++;
+  if (!**p) return NULL;
+  char *s = *p;
+  while (**p && **p != ' ') (*p)++;
+  if (**p) { **p = '\0'; (*p)++; }
+  return s;
+}
+
+static int isNumber(const char *s)
+{
+  if (!*s) return 0;
+  for (; *s; s++) if (!isdigit((unsigned char)*s)) return 0;
   return 1;
 }
 
-/** One command to one device and axis, and its reply. Lines that are not
-  * that device's and axis's reply (alerts, info, another device's reply) are
-  * skipped, up to ZABER_MAX_LINES. */
+/** Parse one line in place: 1 if it is a reply ("@dd a [id] OK|RJ IDLE|BUSY ff data"),
+  * -1 if it carries a checksum that does not verify, 0 otherwise. */
+static int parseReply(char *line, ZaberReply *r)
+{
+  if (line[0] != '@') return 0;
+  size_t len = strlen(line);
+  if (len > 3 && line[len - 3] == ':') {
+    if (!checksumOk(line, line + len - 3)) return -1;
+    line[len - 3] = '\0';
+  }
+  char *p = line + 1;
+  char *dev = word(&p), *ax = word(&p), *w = word(&p);
+  if (!dev || !ax || !w || !isNumber(dev) || !isNumber(ax)) return 0;
+  r->id = -1;
+  if (isNumber(w)) {
+    r->id = atoi(w);
+    w = word(&p);
+    if (!w) return 0;
+  }
+  char *status = word(&p), *flag = word(&p);
+  if (!status || !flag) return 0;
+  if (strcmp(w, "OK") && strcmp(w, "RJ")) return 0;
+  if (strcmp(status, "IDLE") && strcmp(status, "BUSY")) return 0;
+  if (strlen(flag) != 2) return 0;
+  r->device = atoi(dev);
+  r->axis = atoi(ax);
+  r->ok = !strcmp(w, "OK");
+  r->busy = !strcmp(status, "BUSY");
+  strcpy(r->flag, flag);
+  while (*p == ' ') p++;
+  snprintf(r->data, sizeof(r->data), "%s", p);
+  for (size_t m = strlen(r->data); m > 0 && isspace((unsigned char)r->data[m - 1]); m--) r->data[m - 1] = '\0';
+  return 1;
+}
+
+/** One command to one device and axis, and its reply: the line with that
+  * address, axis and message id. Anything else (alerts, info lines, another
+  * address's reply, a late reply to an earlier command) is skipped, up to
+  * ZABER_MAX_LINES lines. */
 asynStatus ZaberController::exchange(int device, int axis, const char *command, ZaberReply *r)
 {
   char out[ZABER_REPLY_LEN], line[ZABER_REPLY_LEN];
@@ -123,7 +193,9 @@ asynStatus ZaberController::exchange(int device, int axis, const char *command, 
   asynStatus status;
 
   if (device < 1 || device > 99) return asynError;     /* never the broadcast address */
-  snprintf(out, sizeof(out), "/%d %d %s", device, axis, command);
+  int id = nextId_;
+  nextId_ = (nextId_ + 1) % 100;
+  snprintf(out, sizeof(out), "/%d %d %02d %s", device, axis, id, command);
   pasynOctetSyncIO->flush(pasynUserController_);
   status = pasynOctetSyncIO->write(pasynUserController_, out, strlen(out), ZABER_TIMEOUT, &nwrite);
   if (status) return status;
@@ -133,8 +205,13 @@ asynStatus ZaberController::exchange(int device, int axis, const char *command, 
     line[nread] = '\0';
     char *p = line;
     while (*p && isspace((unsigned char)*p)) p++;
-    if (!parseReply(p, r)) continue;
-    if (r->device != device || r->axis != axis) continue;
+    int parsed = parseReply(p, r);
+    if (parsed < 0) {
+      asynPrint(pasynUserSelf, ASYN_TRACE_ERROR, "%s: a reply whose checksum does not verify, dropped\n", driverName);
+      continue;
+    }
+    if (!parsed) continue;
+    if (r->device != device || r->axis != axis || r->id != id) continue;
     return asynSuccess;
   }
   return asynError;
@@ -144,9 +221,10 @@ asynStatus ZaberController::exchange(int device, int axis, const char *command, 
 
 ZaberAxis::ZaberAxis(ZaberController *pC, int axisNo)
   : asynMotorAxis(pC, axisNo),
-    pC_(pC), device_(0), axis_(1), speedArgs_(0), allowHome_(0), powerPolicy_(ZABER_POWER_LEAVE),
-    powerOffDelay_(0.0), identified_(0), firmware_(0), moving_(0), busy_(0), homed_(0), failures_(0),
-    driverOn_(1), offPending_(0), lastPos_(0), nflags_(0)
+    pC_(pC), device_(0), axis_(1), speedArgs_(0), allowHome_(0), allowUnreferenced_(0), allowClear_(0),
+    powerPolicy_(ZABER_POWER_LEAVE), powerOffDelay_(0.0), identified_(0), firmware_(0), moving_(0), busy_(0),
+    homed_(0), failures_(0), backoff_(0), driverOn_(1), weDisabled_(0), lastDirPositive_(1), offPending_(0),
+    lastPos_(0), nflags_(0)
 {
   setIntegerParam(pC_->motorStatusHasEncoder_, 0);
   setIntegerParam(pC_->motorStatusGainSupport_, 0);
@@ -156,13 +234,16 @@ ZaberAxis::ZaberAxis(ZaberController *pC, int axisNo)
   pC_->setIntegerParam(axisNo_, pC_->ZaberDeviceId_, 0);
   pC_->setIntegerParam(axisNo_, pC_->ZaberPeripheralId_, 0);
   pC_->setIntegerParam(axisNo_, pC_->ZaberSerial_, 0);
+  pC_->setIntegerParam(axisNo_, pC_->ZaberResolution_, 0);
+  pC_->setIntegerParam(axisNo_, pC_->ZaberClearWarnings_, 0);
   pC_->setDoubleParam(axisNo_, pC_->ZaberMaxspeed_, 0.0);
   pC_->setDoubleParam(axisNo_, pC_->ZaberLimitMin_, 0.0);
   pC_->setDoubleParam(axisNo_, pC_->ZaberLimitMax_, 0.0);
   callParamCallbacks();
 }
 
-void ZaberAxis::configure(int device, int axis, int speedArgs, int allowHome, int powerPolicy, double powerOffDelay)
+void ZaberAxis::configure(int device, int axis, int speedArgs, int allowHome, int powerPolicy, double powerOffDelay,
+                          int allowUnreferenced, int allowClearWarnings)
 {
   device_ = device;
   axis_ = axis;
@@ -170,16 +251,20 @@ void ZaberAxis::configure(int device, int axis, int speedArgs, int allowHome, in
   allowHome_ = allowHome ? 1 : 0;
   powerPolicy_ = powerPolicy;
   powerOffDelay_ = powerOffDelay;
+  allowUnreferenced_ = allowUnreferenced ? 1 : 0;
+  allowClear_ = allowClearWarnings ? 1 : 0;
 }
 
 void ZaberAxis::report(FILE *fp, int level)
 {
   if (level > 0) {
-    fprintf(fp, "  device %d axis %d: firmware %d.%02d, speed args %d, home %s, power %s (off after %g s), "
-                "moving %d, busy %d, homed %d, driver on %d, last pos %ld, flags %d\n",
+    fprintf(fp, "  device %d axis %d: firmware %d.%02d, speed args %d, home %s, unreferenced moves %s, "
+                "warnings clear %s, power %s (off after %g s), moving %d, busy %d, homed %d, driver on %d, "
+                "failures %d, last pos %ld, flags %d\n",
             device_, axis_, firmware_ / 100, firmware_ % 100, speedArgs_, allowHome_ ? "allowed" : "refused",
+            allowUnreferenced_ ? "allowed" : "refused", allowClear_ ? "allowed" : "refused",
             powerPolicy_ == ZABER_POWER_ON_FOR_MOVE ? "on_for_move" : "leave", powerOffDelay_,
-            moving_, busy_, homed_, driverOn_, lastPos_, nflags_);
+            moving_, busy_, homed_, driverOn_, failures_, lastPos_, nflags_);
   }
   asynMotorAxis::report(fp, level);
 }
@@ -195,18 +280,18 @@ asynStatus ZaberAxis::deviceCmd(const char *command, ZaberReply *r)
 }
 
 /** The identity and the settings the record's configuration is checked
-  * against, read once: all "get", nothing else. A rejected or silent get
-  * leaves its reading empty (older firmware lacks some settings). */
+  * against: all "get". Retried on later polls until get version answers
+  * (a stage off or mis-addressed at boot is identified when it answers). */
 void ZaberAxis::identify()
 {
   ZaberReply r;
-  if (deviceCmd("get version", &r) == asynSuccess && r.ok) {
-    int major = 0, minor = 0;
-    if (sscanf(r.data, "%d.%d", &major, &minor) == 2) firmware_ = major * 100 + minor;
-    pC_->setStringParam(axisNo_, pC_->ZaberVersion_, r.data);
-  } else {
+  if (deviceCmd("get version", &r) != asynSuccess || !r.ok) {
     pC_->setStringParam(axisNo_, pC_->ZaberVersion_, "no reply");
+    return;
   }
+  int major = 0, minor = 0;
+  if (sscanf(r.data, "%d.%d", &major, &minor) == 2) firmware_ = major * 100 + minor;
+  pC_->setStringParam(axisNo_, pC_->ZaberVersion_, r.data);
   if ((deviceCmd("get deviceid", &r) == asynSuccess && r.ok) ||
       (deviceCmd("get device.id", &r) == asynSuccess && r.ok)) {
     pC_->setIntegerParam(axisNo_, pC_->ZaberDeviceId_, atoi(r.data));
@@ -217,6 +302,9 @@ void ZaberAxis::identify()
   if ((cmd("get peripheralid", &r) == asynSuccess && r.ok) ||
       (cmd("get peripheral.id", &r) == asynSuccess && r.ok)) {
     pC_->setIntegerParam(axisNo_, pC_->ZaberPeripheralId_, atoi(r.data));
+  }
+  if (cmd("get resolution", &r) == asynSuccess && r.ok) {
+    pC_->setIntegerParam(axisNo_, pC_->ZaberResolution_, atoi(r.data));
   }
   if (cmd("get maxspeed", &r) == asynSuccess && r.ok) {
     pC_->setDoubleParam(axisNo_, pC_->ZaberMaxspeed_, strtod(r.data, NULL));
@@ -230,22 +318,22 @@ void ZaberAxis::identify()
   identified_ = 1;
 }
 
-/** "warnings": "<count> <flag> <flag> ..." in the data. Without a reply,
-  * the top flag alone. */
-asynStatus ZaberAxis::readWarnings(const char *topFlag)
+/** The flags of a fresh reply: the top flag alone when it is "--", else the
+  * full list ("warnings": "<count> <flag> <flag> ..."), the top flag alone
+  * if that query fails. */
+void ZaberAxis::takeFlags(const ZaberReply &top)
 {
   ZaberReply r;
   nflags_ = 0;
-  if (strcmp(topFlag, "--") == 0) return asynSuccess;
-  asynStatus status = cmd("warnings", &r);
-  if (status == asynSuccess && r.ok) {
+  pC_->setStringParam(axisNo_, pC_->ZaberFlag_, top.flag);
+  if (strcmp(top.flag, "--") == 0) return;
+  if (cmd("warnings", &r) == asynSuccess && r.ok) {
     char *save = NULL, *tok = strtok_r(r.data, " ", &save);    /* the count */
     while (tok && (tok = strtok_r(NULL, " ", &save)) != NULL && nflags_ < ZABER_MAX_FLAGS) {
       if (strlen(tok) == 2) { strcpy(flags_[nflags_], tok); nflags_++; }
     }
   }
-  if (nflags_ == 0) { strcpy(flags_[0], topFlag); nflags_ = 1; }
-  return status;
+  if (nflags_ == 0) { strcpy(flags_[0], top.flag); nflags_ = 1; }
 }
 
 int ZaberAxis::hasFlag(const char *flag) const
@@ -254,14 +342,17 @@ int ZaberAxis::hasFlag(const char *flag) const
   return 0;
 }
 
-/** Faults (F...) are problems, except the driver being off: FO (7.11 and
-  * up), and FD on 7.10 and below, where FD meant "driver disabled" (it means
-  * a temperature or current error from 7.11). */
+/** Faults (F...) are problems, except the driver off by request: FO (7.11 and
+  * up), and FD while this IOC's own "driver disable" stands. FD is otherwise a
+  * fault on every firmware: the firmware 6 manual's FD is the driver disabling
+  * itself on overheating, the firmware 7 manual's an overheating or
+  * over-current driver ("called Driver Disabled in 7.10 and below", the flag
+  * a driver disable raised there). */
 int ZaberAxis::isFault(const char *flag) const
 {
   if (flag[0] != 'F') return 0;
   if (strcmp(flag, "FO") == 0) return 0;
-  if (strcmp(flag, "FD") == 0 && firmware_ > 0 && firmware_ <= 710) return 0;
+  if (strcmp(flag, "FD") == 0 && weDisabled_) return 0;
   return 1;
 }
 
@@ -275,13 +366,44 @@ asynStatus ZaberAxis::driverEnable()
               driverName, device_, axis_, r.data);
     return asynError;
   }
+  if (status == asynSuccess) weDisabled_ = 0;
   return status;
 }
 
+void ZaberAxis::scheduleOff(double delay)
+{
+  epicsTimeGetCurrent(&offAt_);
+  epicsTimeAddSeconds(&offAt_, delay);
+  offPending_ = 1;
+}
+
+/** "warnings clear", from the clear_warnings record: clears the latching
+  * flags (FS, FE, FT, FQ, FB, WL, WS, NI ...) that only it clears. Only with
+  * allow_clear_warnings, and only from a WRITER (access.acf). */
+asynStatus ZaberAxis::clearWarnings()
+{
+  ZaberReply r;
+  if (!device_) return asynError;
+  if (!allowClear_) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+              "%s:clearWarnings: device %d axis %d: not allowed on this axis (allow_clear_warnings); nothing sent\n",
+              driverName, device_, axis_);
+    return asynError;
+  }
+  asynStatus status = cmd("warnings clear", &r);
+  if (status) return status;
+  asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:clearWarnings: device %d axis %d: cleared (%s)\n",
+            driverName, device_, axis_, r.data);
+  return r.ok ? asynSuccess : asynError;
+}
+
 /** move abs <target> [<speed> <accel>]: always absolute (the record's
-  * relative moves are added to the last position read). The speed and accel
-  * arguments (firmware 7.25 and up) only with speed_args; otherwise the
-  * device's own maxspeed and accel settings govern, and nothing is "set". */
+  * relative moves are added to the position just read). Refused while the
+  * axis has no reference (WR) unless allow_unreferenced: its limits and
+  * positions then do not match the physical travel (protocol manual, WR),
+  * so the record's DLLM/DHLM would be measured from the wrong origin. The
+  * speed and accel arguments (firmware 7.25 and up) only with speed_args;
+  * otherwise the device's own maxspeed and accel settings govern. */
 asynStatus ZaberAxis::move(double position, int relative, double minVelocity, double maxVelocity, double acceleration)
 {
   static const char *functionName = "move";
@@ -296,12 +418,25 @@ asynStatus ZaberAxis::move(double position, int relative, double minVelocity, do
               driverName, functionName, device_, axis_);
     return asynError;
   }
+  if (speedArgs_ && firmware_ < ZABER_SPEED_ARGS_FW) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+              "%s:%s: device %d axis %d: speed_args needs firmware 7.25 and up (this one: %s): move refused\n",
+              driverName, functionName, device_, axis_, firmware_ ? "older" : "not read yet");
+    return asynError;
+  }
   status = cmd("get pos", &r);
   if (status || !r.ok) return asynError;
   lastPos_ = strtol(r.data, NULL, 10);
+  takeFlags(r);
   if (r.busy) {
     asynPrint(pasynUser_, ASYN_TRACE_ERROR,
               "%s:%s: device %d axis %d: busy (a move, a home or the knob): move refused\n",
+              driverName, functionName, device_, axis_);
+    return asynError;
+  }
+  if (hasFlag("WR") && !allowUnreferenced_) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+              "%s:%s: device %d axis %d: no reference position (WR): move refused (home it, or allow_unreferenced)\n",
               driverName, functionName, device_, axis_);
     return asynError;
   }
@@ -321,15 +456,13 @@ asynStatus ZaberAxis::move(double position, int relative, double minVelocity, do
   if (!r.ok) {
     asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:%s: device %d axis %d: '%s' rejected (%s)\n",
               driverName, functionName, device_, axis_, command, r.data);
-    if (powerPolicy_ == ZABER_POWER_ON_FOR_MOVE) {     /* enabled for a move that never ran: off again */
-      epicsTimeGetCurrent(&offAt_);
-      offPending_ = 1;
-    }
+    if (powerPolicy_ == ZABER_POWER_ON_FOR_MOVE) scheduleOff(0.0);   /* enabled for a move that never ran */
     return asynError;
   }
   moving_ = 1;
   busy_ = 1;
-  setIntegerParam(pC_->motorStatusDirection_, target >= lastPos_ ? 1 : 0);
+  lastDirPositive_ = target >= lastPos_ ? 1 : 0;
+  setIntegerParam(pC_->motorStatusDirection_, lastDirPositive_);
   setIntegerParam(pC_->motorStatusDone_, 0);
   setIntegerParam(pC_->motorStatusMoving_, 1);
   callParamCallbacks();
@@ -347,7 +480,8 @@ asynStatus ZaberAxis::moveVelocity(double minVelocity, double maxVelocity, doubl
 }
 
 /** "home": toward the motor end at the device's own approach speed, which
-  * sets the reference (WR clears). Only with allow_home. */
+  * sets the reference (WR clears). Only with allow_home; accepted under WR,
+  * since a home is what gives the axis its reference. */
 asynStatus ZaberAxis::home(double minVelocity, double maxVelocity, double acceleration, int forwards)
 {
   ZaberReply r;
@@ -364,33 +498,44 @@ asynStatus ZaberAxis::home(double minVelocity, double maxVelocity, double accele
   if (!r.ok) {
     asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:home: device %d axis %d: rejected (%s)\n",
               driverName, device_, axis_, r.data);
+    if (powerPolicy_ == ZABER_POWER_ON_FOR_MOVE) scheduleOff(0.0);
     return asynError;
   }
   moving_ = 1;
   busy_ = 1;
+  lastDirPositive_ = 0;                  /* toward the motor end */
   setIntegerParam(pC_->motorStatusDone_, 0);
   setIntegerParam(pC_->motorStatusMoving_, 1);
   callParamCallbacks();
   return asynSuccess;
 }
 
-/** "stop" (decelerate) only to an axis a fresh "get pos" says is BUSY: the
-  * record sends STOP to idle axes too. */
+/** "stop" (decelerate), sent unless a fresh, valid reply says the axis is
+  * IDLE: a failed, garbled or rejected "get pos" sends it anyway, since a
+  * stop to an idle axis is harmless and a stop lost to a dropped reply is
+  * not. A second stop while the axis is still decelerating is the device's
+  * instant stop (protocol manual, stop): what an operator who presses STOP
+  * twice asks for. An error is returned when the stop itself failed. */
 asynStatus ZaberAxis::stop(double acceleration)
 {
   ZaberReply r;
   if (!device_) return asynSuccess;
-  if (cmd("get pos", &r) == asynSuccess && r.ok && r.busy) {
-    asynStatus status = cmd("stop", &r);
-    if (status == asynSuccess && !r.ok) {
-      asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:stop: device %d axis %d: rejected (%s)\n",
-                driverName, device_, axis_, r.data);
-      return asynError;
-    }
+  if (cmd("get pos", &r) == asynSuccess && r.ok && !r.busy) {
+    asynPrint(pasynUser_, ASYN_TRACE_FLOW, "%s:stop: device %d axis %d: IDLE; nothing sent\n",
+              driverName, device_, axis_);
+    return asynSuccess;
+  }
+  asynStatus status = cmd("stop", &r);
+  if (status) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:stop: device %d axis %d: stop sent, no reply (status %d)\n",
+              driverName, device_, axis_, (int)status);
     return status;
   }
-  asynPrint(pasynUser_, ASYN_TRACE_FLOW, "%s:stop: device %d axis %d: not busy; nothing sent\n",
-            driverName, device_, axis_);
+  if (!r.ok) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:stop: device %d axis %d: rejected (%s)\n",
+              driverName, device_, axis_, r.data);
+    return asynError;
+  }
   return asynSuccess;
 }
 
@@ -406,13 +551,19 @@ asynStatus ZaberAxis::setPosition(double position)
 asynStatus ZaberAxis::poll(bool *moving)
 {
   ZaberReply r;
-  int fail = 0;
+  int fail = 0, asked = 1;
   char text[ZABER_MAX_FLAGS * 3 + 1];
 
   if (!device_) { *moving = false; return asynSuccess; }
-  if (!identified_) identify();
 
-  if (cmd("get pos", &r) == asynSuccess && r.ok) {
+  if (backoff_ > 0) {
+    /* A silent axis is asked once per ZABER_BACKOFF_POLLS polls, so it does
+     * not hold the line (and every other axis's poll, stop or move) for a
+     * timeout each cycle. It keeps its comm error and problem meanwhile. */
+    backoff_--;
+    fail = 1;
+    asked = 0;
+  } else if (cmd("get pos", &r) == asynSuccess && r.ok) {
     char *end;
     long pos = strtol(r.data, &end, 10);
     if (end == r.data) {
@@ -423,8 +574,8 @@ asynStatus ZaberAxis::poll(bool *moving)
       lastPos_ = pos;
       busy_ = r.busy;
       setDoubleParam(pC_->motorPosition_, (double)pos);
-      pC_->setStringParam(axisNo_, pC_->ZaberFlag_, r.flag);
-      readWarnings(r.flag);
+      takeFlags(r);
+      if (!identified_) identify();
     }
   } else {
     fail = 1;
@@ -439,15 +590,17 @@ asynStatus ZaberAxis::poll(bool *moving)
       if (isFault(flags_[i])) problem = 1;
     }
     pC_->setStringParam(axisNo_, pC_->ZaberWarnings_, text);
-    homed_ = !hasFlag("WR");
-    driverOn_ = !(hasFlag("FO") || (hasFlag("FD") && !isFault("FD")));
+    homed_ = !(hasFlag("WR") || hasFlag("WH"));
+    driverOn_ = !(hasFlag("FO") || hasFlag("FD"));
+    /* WL: a limit sensor interrupted a move. The device has no limit-switch
+     * bits of its own; the record sees a limit on the side of our last move,
+     * so it ends a move in that direction instead of reporting it complete. */
+    int wl = hasFlag("WL");
+    setIntegerParam(pC_->motorStatusHighLimit_, wl && lastDirPositive_);
+    setIntegerParam(pC_->motorStatusLowLimit_, wl && !lastDirPositive_);
     if (moving_ && !busy_) {
       moving_ = 0;
-      if (powerPolicy_ == ZABER_POWER_ON_FOR_MOVE) {
-        epicsTimeGetCurrent(&offAt_);
-        epicsTimeAddSeconds(&offAt_, powerOffDelay_);
-        offPending_ = 1;
-      }
+      if (powerPolicy_ == ZABER_POWER_ON_FOR_MOVE) scheduleOff(powerOffDelay_);
     }
     if (offPending_ && !busy_) {
       epicsTimeStamp now;
@@ -455,7 +608,9 @@ asynStatus ZaberAxis::poll(bool *moving)
       if (epicsTimeDiffInSeconds(&now, &offAt_) >= 0) {
         ZaberReply d;
         offPending_ = 0;
-        if (cmd("driver disable", &d) != asynSuccess || !d.ok) {
+        if (cmd("driver disable", &d) == asynSuccess && d.ok) {
+          weDisabled_ = 1;
+        } else {
           asynPrint(pasynUser_, ASYN_TRACE_ERROR, "%s:poll: device %d axis %d: driver disable failed\n",
                     driverName, device_, axis_);
         }
@@ -464,7 +619,14 @@ asynStatus ZaberAxis::poll(bool *moving)
     setIntegerParam(pC_->motorStatusProblem_, problem);
   }
 
-  if (fail) failures_++; else failures_ = 0;
+  if (fail) {
+    if (failures_ < ZABER_POLL_FAILURES) failures_++;
+    /* re-armed only by a poll that asked and got nothing: the poll after a
+     * backoff always asks */
+    if (asked && failures_ >= ZABER_POLL_FAILURES) backoff_ = ZABER_BACKOFF_POLLS - 1;
+  } else {
+    failures_ = 0;
+  }
   if (failures_ >= ZABER_POLL_FAILURES) setIntegerParam(pC_->motorStatusProblem_, 1);
   *moving = (busy_ || moving_) ? true : false;
   setIntegerParam(pC_->motorStatusDone_, *moving ? 0 : 1);
@@ -472,10 +634,6 @@ asynStatus ZaberAxis::poll(bool *moving)
   setIntegerParam(pC_->motorStatusHomed_, homed_);
   setIntegerParam(pC_->motorStatusPowerOn_, driverOn_);
   setIntegerParam(pC_->motorStatusCommsError_, fail);
-  /* No limit switches as such: the device stops at limit.min / limit.max by
-   * itself and rejects targets outside them; FE (limit error) is a fault. */
-  setIntegerParam(pC_->motorStatusLowLimit_, 0);
-  setIntegerParam(pC_->motorStatusHighLimit_, 0);
   callParamCallbacks();
   return failures_ >= ZABER_POLL_FAILURES ? asynError : asynSuccess;
 }
@@ -494,9 +652,11 @@ extern "C" int ZaberCreateController(const char *portName, const char *serialPor
   return asynSuccess;
 }
 
-/** ZaberAxisConfig(portName, motor, device, axis, speedArgs, allowHome, powerPolicy, powerOffDelay) */
+/** ZaberAxisConfig(portName, motor, device, axis, speedArgs, allowHome, powerPolicy, powerOffDelay,
+  *                 allowUnreferenced, allowClearWarnings) */
 extern "C" int ZaberAxisConfig(const char *portName, int motor, int device, int axis, int speedArgs,
-                               int allowHome, const char *powerPolicy, const char *powerOffDelay)
+                               int allowHome, const char *powerPolicy, const char *powerOffDelay,
+                               int allowUnreferenced, int allowClearWarnings)
 {
   ZaberController *pC = static_cast<ZaberController *>(findAsynPortDriver(portName));
   int policy;
@@ -514,6 +674,14 @@ extern "C" int ZaberAxisConfig(const char *portName, int motor, int device, int 
            device, axis);
     return asynError;
   }
+  for (int i = 0; i < MAX_ZABER_AXES; i++) {
+    ZaberAxis *other = (i == motor - 1) ? NULL : pC->getAxis(i);
+    if (other && other->isAt(device, axis)) {
+      printf("ZaberAxisConfig: %s motor %d is already device %d axis %d: two records on one stage refused\n",
+             portName, i + 1, device, axis);
+      return asynError;
+    }
+  }
   if (!powerPolicy || !*powerPolicy || !strcmp(powerPolicy, "leave")) policy = ZABER_POWER_LEAVE;
   else if (!strcmp(powerPolicy, "on_for_move")) policy = ZABER_POWER_ON_FOR_MOVE;
   else {
@@ -523,7 +691,7 @@ extern "C" int ZaberAxisConfig(const char *portName, int motor, int device, int 
   double offDelay = powerOffDelay ? strtod(powerOffDelay, NULL) : 0.0;
   if (offDelay < 0) offDelay = 0;
   pC->lock();                            /* the poller is already running */
-  pAxis->configure(device, axis, speedArgs, allowHome, policy, offDelay);
+  pAxis->configure(device, axis, speedArgs, allowHome, policy, offDelay, allowUnreferenced, allowClearWarnings);
   /* One poll now, so the record initialises from the real position: the
    * poller's first poll ran before this axis had an address and sent nothing. */
   {
@@ -554,13 +722,15 @@ static const iocshArg axisArg4 = {"Speed arguments on move abs (1: firmware 7.25
 static const iocshArg axisArg5 = {"Allow home (1/0)", iocshArgInt};
 static const iocshArg axisArg6 = {"Power policy (leave, on_for_move)", iocshArgString};
 static const iocshArg axisArg7 = {"Power off delay (s)", iocshArgString};
-static const iocshArg * const axisArgs[] = {&axisArg0, &axisArg1, &axisArg2, &axisArg3,
-                                            &axisArg4, &axisArg5, &axisArg6, &axisArg7};
-static const iocshFuncDef axisDef = {"ZaberAxisConfig", 8, axisArgs};
+static const iocshArg axisArg8 = {"Allow moves without a reference, WR (1/0)", iocshArgInt};
+static const iocshArg axisArg9 = {"Allow warnings clear (1/0)", iocshArgInt};
+static const iocshArg * const axisArgs[] = {&axisArg0, &axisArg1, &axisArg2, &axisArg3, &axisArg4,
+                                            &axisArg5, &axisArg6, &axisArg7, &axisArg8, &axisArg9};
+static const iocshFuncDef axisDef = {"ZaberAxisConfig", 10, axisArgs};
 static void axisCallFunc(const iocshArgBuf *args)
 {
   ZaberAxisConfig(args[0].sval, args[1].ival, args[2].ival, args[3].ival, args[4].ival, args[5].ival,
-                  args[6].sval, args[7].sval);
+                  args[6].sval, args[7].sval, args[8].ival, args[9].ival);
 }
 
 static void ZaberRegister(void)
