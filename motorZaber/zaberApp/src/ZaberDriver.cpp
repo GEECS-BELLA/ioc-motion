@@ -497,6 +497,16 @@ asynStatus ZaberAxis::move(double position, int relative, double minVelocity, do
     return asynError;
   }
   long target = relative ? lastPos_ + NINT(position) : NINT(position);
+  /* A latched WL is a limit switch on its side: a move further that way is
+   * refused, nothing sent (the record, seeing HLS or LLS in the direction of
+   * motion, would otherwise abandon the move it had just sent, resetting VAL
+   * to RBV while the stage ran on to the target). A move away is allowed. */
+  if ((wlSide_ == ZABER_WL_HIGH && target > lastPos_) || (wlSide_ == ZABER_WL_LOW && target < lastPos_)) {
+    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
+              "%s:%s: device %d axis %d: WL latched on the %s side: a move further that way is refused\n",
+              driverName, functionName, device_, axis_, wlSide_ == ZABER_WL_HIGH ? "high" : "low");
+    return asynError;
+  }
   if (powerPolicy_ == ZABER_POWER_ON_FOR_MOVE && driverEnable() != asynSuccess) return asynError;
   if (speedArgs_) {
     long speed = NINT(fabs(maxVelocity) * ZABER_VELOCITY_DATA);
