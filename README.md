@@ -1304,10 +1304,12 @@ set by its auto-detection during each channel's first move: all eight read
   read by the next axis's first `TE?` (m6 flagged, then cleared by its own
   retry). 2026.10.3b13 reads the rest of the queue after a non-zero code;
   2026.10.3b14 also reads the queue before every motion command and charges
-  a late channel code to its own channel's axis. So an empty channel is
-  caught by RTRY (the count did not change), its alarm arrives with the retry
-  or at the next motion command on that controller, and no other axis is
-  flagged for it.
+  a late channel code to its own channel's axis, and 2026.10.3b15 keeps that
+  axis's latch through the command it was found before (b14's retry, taken
+  with `TE?` 0, cleared it: the fake showed the empty channel at NO_ALARM
+  until the next move on its controller). So an empty channel is caught by
+  RTRY (the count did not change) and alarms with its retry, and no other
+  axis is flagged for it.
 - **No limits, no home, no motor check.** The 8742 has no limit inputs;
   MSTA's home bit is the driver's "position is 0". `MC` (motor check: one
   step each way on every channel) and `QM` are never sent.
