@@ -77,8 +77,9 @@ record(longin, "$(P)$(M):resolution")
 	field(INP,  "@asyn($(PORT),$(ADDR))ZABER_RESOLUTION")
 	field(SCAN, "I/O Intr")
 }
-# The one write here, a momentary button (it reads back 0 after every put,
-# so a refused put leaves no WRITE alarm): 1 sends "warnings clear" to this axis, only when its
+# The one write here, a momentary button (HIGH: the record returns itself to
+# Idle 0.5 s after every put, and the 0 it writes sends nothing; a refused put
+# is logged by the IOC and leaves no alarm): 1 sends "warnings clear" to this axis, only when its
 # entity has allow_clear_warnings (else refused, nothing sent), and only from
 # the access security's writer. It acknowledges the latching flags (FS, FE,
 # FT, FQ, FB, WL, WS, NI); their cause is the operator's to fix first.
@@ -89,7 +90,7 @@ record(bo, "$(P)$(M):clear_warnings")
 	field(OUT,  "@asyn($(PORT),$(ADDR))ZABER_CLEAR_WARNINGS")
 	field(ZNAM, "Idle")
 	field(ONAM, "Clear")
-	info(asyn:READBACK, "1")
+	field(HIGH, "0.5")
 }
 # A stop that got no reply or a rejection: MAJOR until a stop or move is
 # acknowledged or the axis is seen at rest. Not resent automatically (a
