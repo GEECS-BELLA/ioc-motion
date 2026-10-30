@@ -364,27 +364,30 @@ controller with other values gets the first one's, unchecked). With
   so no step is lost or credited to the wrong axis whichever reply goes
   missing. Each axis is 0 when the IOC starts. `TP` and `TS` replies that do
   not echo their command are errors.
+- **One alarm bit: slip/stall.** Every alarm this driver raises is
+  `EA_SLIP_STALL` (MSTA bit 6, set through `motorStatusFollowingError_`;
+  `motorStatusSlip_` is bit 4, `EA_SLIP`, which the record does not read).
+  In motor R7-4 (the image's, `versions.json`) that bit is read only by
+  `alarm_sub` (STATE/MAJOR); it is not in the MOVN/`clear_buttons` test
+  (which reads `RA_PROBLEM` and the limits), and the record does not clear
+  it. The problem bit makes the record clear its jog buttons (b8's
+  unreleasable jog); the comms-error bit puts the record in COMM_ALARM, and
+  devMotorAsyn's `build_trans` then drops **every** command, STOP included
+  ("If we are already in COMM_ALARM then this server is not reachable"):
+  on 2026.10.3b10, which re-sent it every poll, a STOP after an IOC restart
+  mid-move never reached the driver (the fake). Neither is used.
 - **The poll.** Busy: the axis is done (it cannot move), its count kept.
   A timeout, a malformed reply, an unknown selection or a `CC` refused with
-  another code (`TE-5` in local mode): the **comms-error bit**
-  (`CNTRL_COMM_ERR`: COMM/INVALID on the record) with done kept as last
-  read. Unlike the problem bit it does not make the record set MOVN 0 or
-  clear its jog buttons. The record clears the bit in its own MSTA once it
-  has raised the alarm (`alarm_sub`), so the driver sends the status again
-  on every failing poll: the alarm holds while the condition does (a record
-  processed between two polls, e.g. by a STOP put, can show NO_ALARM until
-  the next poll, at most a poll period). An accepted move, jog or home sets
-  done 0 at once (`lastDone_`), so a late reply on the first poll after it
-  keeps DMOV 0.
+  another code (`TE-5` in local mode): the slip/stall bit while it lasts,
+  done kept as last read, so a stepping axis does not read done. An
+  accepted move, jog or home sets done 0 at once (`lastDone_`), so a late
+  reply on the first poll after it keeps DMOV 0.
 - **Move, home.** Sent only once the pair is selected; an absolute target is
   computed from the axis's count read just before. Refused (busy, unknown,
   or a home without `has_limits`): nothing sent, a console line, and the
-  refusal **latched in the slip/stall bit** (`EA_SLIP_STALL`) until a later
-  move, jog or home of that axis is accepted. In motor R7-4 (the image's,
-  `versions.json`) that bit is read only by `alarm_sub` (STATE/MAJOR) and
-  not by the MOVN/`clear_buttons` test, which reads `RA_PROBLEM` and the
-  limits: so the refused move ends done **and MAJOR** in the same update,
-  VAL left at the target, and no jog button is touched. (b8 latched the
+  refusal **latched in the slip/stall bit** until a later move, jog or home
+  of that axis is accepted: the refused move ends done **and MAJOR** in the
+  same update, VAL left at the target, and no jog button is touched. (b8 latched the
   problem bit instead: the record then cleared the next jog's buttons, its
   release sent no `ST` and the jog ran past DHLM; b9 latched nothing, and a
   refused move read as success to a client checking DMOV and SEVR, ophyd's
@@ -393,7 +396,7 @@ controller with other values gets the first one's, unchecked). With
   refused (busy, unknown), or refused by the switch: the problem bit for
   that one update, so the record clears its jog buttons rather than asking
   again; the next poll clears it. An accepted move, jog or home clears the
-  problem and comms-error bits at once.
+  problem and slip/stall bits at once.
 - **Stop never waits for a `CC`.** Known and another pair selected: nothing
   on this pair moves, nothing sent. Known and this pair: `<axis>ST` at once.
   Unknown: `<axis>ST` at once for an axis of `refPair_`, the only pair this
@@ -417,9 +420,12 @@ nothing but `VE`, `TS` and `TE` answers without it. The channel check and the
 per-axis count are worth proposing upstream as they stand; the init writes as
 an option.
 
-The slip-bit latch, the comms error re-sent, `lastDone_` on acceptance, the
-STOP with `refPair_` 0 and the idle check before `refPair_` changes are
-2026.10.3b10 (the third review of #18); the comms-error, jog and
+The slip/stall bit for every alarm (the refusal latched, failures while
+they last, no COMM_ALARM) is 2026.10.3b11; `lastDone_` on acceptance, the
+STOP with `refPair_` 0 and the idle check before `refPair_` changes
+2026.10.3b10 (the third review of #18; b10 itself latched `motorStatusSlip_`,
+which is `EA_SLIP` and raises nothing, and re-sent the comms error, which
+blocked STOP); the comms-error, jog and
 stop-for-another-pair rules 2026.10.3b9 (the re-review); the selection rules 2026.10.3b8 (the review of #18: on
 b7 a single late reply mid-move zeroed the selection, after which the moving
 axis read done, its STOP went behind a refused `CC` and was dropped, and its
@@ -443,14 +449,14 @@ and the `CC` (the fake) and are superseded.
   two at the maximum amplitude) and the record's time estimate.
 - **No re-entry to remote mode.** A USB replug is a power cycle (the AG-UC8
   is USB-powered): local mode, counters at 0. The IOC sends `MR` at creation
-  only, so afterwards every axis shows the comms-error bit, COMM/INVALID, re-sent every poll (its `TP` unanswered,
+  only, so afterwards every axis shows the slip/stall bit, STATE/MAJOR (its `TP` unanswered,
   a `CC` answered `TE-5`, `CC?` unanswered) until the IOC is recreated, and
   its counts are those of before the replug.
 - **`CC?` while a pair steps** is not proven on the unit (it answered while
   idle); the `TS` fallback covers it once this IOC has moved a pair. After
   an IOC restart mid-move (`refPair_` 0) nothing tells which pair steps:
-  every axis reads the comms error until the motion ends, and a STOP for any
-  axis sends its `<axis>ST`.
+  every axis reads MAJOR until the motion ends, and a STOP for any axis sends
+  its `<axis>ST`.
 - **Positions are counts since the IOC started.** With the patch each axis
   starts at 0 when the IOC does (the controller cannot say which pair took
   the steps its slot counter holds); nothing in the controller survives a
