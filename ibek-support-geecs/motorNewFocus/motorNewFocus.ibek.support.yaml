@@ -1,0 +1,225 @@
+# yaml-language-server: $schema=https://github.com/epics-containers/ibek/releases/download/3.0.1/ibek.support.schema.json
+
+# motorNewFocus (master 0f86a5b) with ioc-motion's patch
+# (motorNewFocus-geecs.patch): the NewFocus 8742 open-loop Picomotor
+# controller on its Ethernet command port, each channel a motor record.
+# README "NewFocus 8742 Picomotor".
+
+module: motorNewFocus
+
+entity_models:
+  # One controller object per TCP connection: one 8742, or the master of an
+  # RS-485 chain with its slaves behind it (the driver addresses every axis
+  # "<controller>><channel>" when num_axes is above 4; 4 channels each).
+  - name: NF874xController
+    description: |-
+      An 8742 (or the master of a chain) on its Ethernet command port (CR
+      out, CR LF in: manual 90066734D 6.1.1, set here; the manual names no
+      port number: upstream's example IOC and the quartiq Python driver use
+      23). Creation sends VE? (and, with check_moves, TE? until 0); the
+      poller sends TP? and MD? per axis. The 8742's Ethernet port is not a
+      serial line (decision 15 does not apply): the entity creates its own
+      asyn IP port, as ESP300Controller does.
+    parameters:
+      name:
+        type: id
+        description: |-
+          The motor driver's asyn port name (the axes' PORT); the IP port is
+          "<name>_IP"
+      address:
+        type: str
+        description: |-
+          host:port of the controller's command port, e.g. 192.0.2.10:23
+          (23 per upstream's example IOC; confirm on the unit)
+      P:
+        type: str
+        description: |-
+          PV prefix of this controller's motor records, with its trailing colon
+      num_axes:
+        type: int
+        description: |-
+          Channels on this connection: 4 per controller (4 for one 8742, 8 for
+          a master and one slave, ...). Above 4 every axis is addressed
+          "<controller>><channel>" (upstream #19; with exactly 4 the driver's
+          internal count, num_axes + 1, already selects that form).
+        default: 4
+      moving_poll_ms:
+        type: int
+        description: |-
+          Poll period while any axis moves, ms. Each poll is TP? and MD? per axis.
+        default: 200
+      idle_poll_ms:
+        type: int
+        description: |-
+          Poll period while idle, ms; 0 = none
+        default: 2000
+      write_only_delay_ms:
+        type: int
+        description: |-
+          Sleep before each command that has no reply (AC, VA, PR, PA, ST,
+          DH ...): upstream #16 saw replies offset from their commands after
+          write-only commands sent back to back. Upstream's example uses 10.
+        default: 10
+      set_limits:
+        type: bool
+        description: |-
+          Upstream: the record's DHLM/DLLM sent as SR/SL (8743-CL commands)
+          at every record init and on every change. false keeps them in the
+          driver and sends nothing; the record enforces its own limits.
+          Applies to every 874x controller in the IOC.
+        default: false
+      home_allowed:
+        type: bool
+        description: |-
+          Upstream: HOMF/HOMR send AC, VA and MT or MZ (8743-CL commands; an
+          open-loop Picomotor has no home switch). false refuses a home with an
+          error and sends nothing. Applies to every 874x controller in the IOC.
+        default: false
+      jog_allowed:
+        type: bool
+        description: |-
+          Upstream: JOGF/JOGR send AC, VA and MV +/-, which runs until ST; an
+          open-loop Picomotor has no switch to end it and a lost link leaves
+          it running. false refuses a jog with an error and sends nothing.
+          Applies to every 874x controller in the IOC.
+        default: false
+      check_moves:
+        type: bool
+        description: |-
+          true: TE? after every motion command (and TE? until 0 at
+          creation); a non-zero code (x14 MOTION IN PROGRESS: an 8742 runs
+          one motor at a time; a refused argument) fails the command and
+          latches the axis's problem bit, a MAJOR STATE alarm, until a later
+          motion command is accepted. false is upstream: the queue is never
+          read and an ignored move completes silently at the old count.
+          Queries only. Applies to every 874x controller in the IOC.
+        default: true
+      trace:
+        type: bool
+        description: |-
+          Every byte on the IP port to the console (asyn trace ERROR|IO_DEVICE, ASCII)
+        default: false
+
+    pre_init:
+      - when: first
+        value: |
+          # ioc-motion's motorNewFocus patch (README): upstream is 1, 1, 1, 0
+          var nf874xSetLimits {{ 1 if set_limits else 0 }}
+          var nf874xHomeAllowed {{ 1 if home_allowed else 0 }}
+          var nf874xJogAllowed {{ 1 if jog_allowed else 0 }}
+          var nf874xCheckMoves {{ 1 if check_moves else 0 }}
+      - value: |
+          drvAsynIPPortConfigure("{{name}}_IP", "{{address}}", 0, 0, 0)
+          {% if trace %}
+          asynSetTraceIOMask("{{name}}_IP", -1, 0x2)
+          asynSetTraceMask("{{name}}_IP", -1, 0x9)
+          {% endif %}
+          asynOctetSetInputEos("{{name}}_IP", 0, "\r\n")
+          asynOctetSetOutputEos("{{name}}_IP", 0, "\r")
+          # nf874xCreateController(port, ipPort, numAxes, movingPollMs, idlePollMs, writeOnlyDelayMs)
+          nf874xCreateController("{{name}}", "{{name}}_IP", {{num_axes}}, {{moving_poll_ms}}, {{idle_poll_ms}}, {{write_only_delay_ms}})
+
+  - name: NF874xAxis
+    description: |-
+      One Picomotor channel as a motor record ($(P)$(M)) on NF874xMotor.db
+      (MRES 1 step, RTRY 1, RSTM Never, DISP). Open loop: the readback is
+      the controller's step count since power-up or the last DH, not a
+      measured position.
+    parameters:
+      controller:
+        type: object
+        description: |-
+          The NF874xController this channel is on
+      unit:
+        type: int
+        description: |-
+          The controller on the chain: 1 for the one on the TCP connection
+          (the master), 2.. for its slaves
+        default: 1
+      channel:
+        type: int
+        description: |-
+          The motor channel on that controller, 1..4 (the front panel's numbers)
+      M:
+        type: str
+        description: |-
+          PV suffix of the motor record, e.g. m1
+      DESC:
+        type: str
+        description: |-
+          Description
+        default: ""
+      DIR:
+        type: enum
+        description: |-
+          User direction
+        default: Pos
+        values:
+          Pos: Pos
+          Neg: Neg
+      VELO:
+        type: float
+        description: |-
+          Velocity, steps/s, sent as VA with each move (a Standard Picomotor
+          at most 2000, a Tiny at most 1750)
+        default: 2000
+      ACCL:
+        type: float
+        description: |-
+          Seconds to velocity, sent as AC = VELO/ACCL steps/s^2 with each move
+          (the controller's default AC is 100000: ACCL 0.02 at 2000)
+        default: 0.02
+      DHLM:
+        type: float
+        description: |-
+          Dial high limit, steps (the record's; with set_limits false nothing
+          reaches the controller)
+        default: 0
+      DLLM:
+        type: float
+        description: |-
+          Dial low limit, steps; 0 and 0 = no record limits
+        default: 0
+      RTRY:
+        type: int
+        description: |-
+          Retries: the record compares TP? with VAL after a move and resends
+          the (absolute) PA when they differ by more than one step; an 8742
+          ignores a move while another motor of that controller runs, so 1
+          retries once, then MISS. 0 ends a dropped move silently unless
+          check_moves is on.
+        default: 1
+      DLY:
+        type: float
+        description: |-
+          Seconds the record waits after a move reads done before comparing
+          (and retrying)
+        default: 0.0
+      PREC:
+        type: int
+        description: |-
+          Display precision
+        default: 0
+      DISP:
+        type: bool
+        description: |-
+          Disable puts to the record (DISP 1) at boot; readbacks stay live
+        default: true
+
+    databases:
+      - file: NF874xMotor.db
+        args:
+          P: "{{controller.P}}"
+          M:
+          DESC:
+          PORT: "{{controller.name}}"
+          ADDR: "{{ (unit - 1) * 4 + channel }}"
+          DIR:
+          VELO:
+          ACCL:
+          DHLM:
+          DLLM:
+          RTRY:
+          DLY:
+          PREC:
+          DISP: "{{ 1 if DISP else 0 }}"

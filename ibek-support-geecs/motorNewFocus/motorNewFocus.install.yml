@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=../../ibek-support/_scripts/support_install_variables.json
+
+# epics-motor/motorNewFocus at master 0f86a5b (2026-04-29; no recipe in
+# upstream ibek-support: ours), with ioc-motion's patch for the 8742 Picomotor
+# controller (README "NewFocus 8742 Picomotor"). Pinned past R1-3 (2026-01-28)
+# for two upstream fixes the GEECS units need: every axis addressed "n>m" when
+# controllers are daisy-chained (#19; R1-3 moved both controllers of a chain
+# on a bare axis number) and a delay before each write-only command (#17;
+# back-to-back writes offset the replies from the commands).
+module: motorNewFocus
+version: 0f86a5bd00ade2dd0dc8ecddd31ea28890f40279
+organization: http://github.com/epics-motor/
+
+dbds:
+  - devNewFocus.dbd
+  - motorRecord.dbd
+  - motorSupport.dbd
+
+libs:
+  - NewFocus
+  - motor
+  - asyn
+
+# The patch (motorNewFocus-geecs.patch): four iocsh variables, upstream
+# behaviour by default:
+#   nf874xSetLimits    (874xMotorDriver.cpp)  1: SR/SL from the record's DHLM/DLLM at init and on change; 0: nothing sent
+#   nf874xHomeAllowed  (874xMotorDriver.cpp)  1: HOMF/HOMR send AC, VA, MT/MZ; 0: refused with an error
+#   nf874xJogAllowed   (874xMotorDriver.cpp)  1: JOGF/JOGR send AC, VA, MV; 0: refused with an error
+#   nf874xCheckMoves   (874xMotorDriver.cpp)  0: the error queue never read; 1: TE? after each motion command, a code latches the problem bit
+# two fixes (no switch): the VE? read (a NULL dereference upstream on an empty
+# or failed reply) and the axis members an 8742 left uninitialized (undefined
+# behaviour); and newFocusApp/Db/NF874xMotor.db (RTRY 1, RSTM Never, DISP).
+patch_file:
+  path: motorNewFocus-geecs.patch
+  when: true

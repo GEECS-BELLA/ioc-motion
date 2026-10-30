@@ -51,6 +51,13 @@ RUN ansible.sh motorAerotech
 COPY ibek-support-geecs/motorPIGCS2/ ${SOURCE_FOLDER}/ibek-support-geecs/motorPIGCS2/
 RUN ansible.sh motorPIGCS2
 
+# motorNewFocus (master 0f86a5b, past R1-3): our recipe (none upstream) with
+# the 8742 patch (switches: no SR/SL from the record's limits, home and jog
+# refused, TE? after each move; the VE? read fix) and the 8742 entities
+# (README "NewFocus 8742 Picomotor").
+COPY ibek-support-geecs/motorNewFocus/ ${SOURCE_FOLDER}/ibek-support-geecs/motorNewFocus/
+RUN ansible.sh motorNewFocus
+
 # motorVelmex: our driver for the Velmex VXM stepping-motor controller with the
 # VRO encoder readout on a second line (README "Velmex VXM + VRO"). No upstream
 # module exists; the source is in this repository (motorVelmex/), copied into
