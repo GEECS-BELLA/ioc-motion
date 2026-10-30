@@ -1126,7 +1126,10 @@ a fault. POWERED = no `FO` or `FD`. `WL` (a limit sensor interrupted a
 move; it latches until `warnings clear`) is the record's limit on one side,
 taken once on the poll where WL first appears, from the move or home of
 this IOC's that was running then (HLS or LLS), and held until WL clears, so
-later moves in either direction do not move it; a WL with no move of this
+later moves in either direction do not move it; like a switch, it refuses a
+move further toward its side (nothing sent: the record, seeing the limit in
+the direction of motion, would abandon the move it had just sent and leave
+VAL behind the stage) and allows a move away; a WL with no move of this
 IOC's behind it (left from before the IOC started) has no known side and is
 PROBLEM instead, until it clears. Once the IOC is running each axis sends
 its whole status once (an init hook), so a condition already present at
