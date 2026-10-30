@@ -339,8 +339,9 @@ defaulting to upstream behaviour (`variable()` lines in `devNewport.dbd`):
 |---|---|---|
 | `AG_UCInitWrites` | `RS` at creation, `SU` forward and reverse per axis | neither: creation sends `MR` and `VE` only |
 | `AG_UCChannelUpstream` | `CC` before every command and every axis poll, result ignored; position = `TP` | the selection kept and checked, each axis its own count, a STOP never behind a `CC` (below) |
+| `AG_UCJogAllowed` | the record's jog sends `JA` at a speed code | refused, nothing sent |
 
-`AG_UCController`'s `init_writes` and `channel_upstream` render them and
+`AG_UCController`'s `init_writes`, `channel_upstream` and `jog_allowed` render them and
 default to false; they are global to the IOC (`when: first`: a second
 controller with other values gets the first one's, unchecked). With
 `AG_UCChannelUpstream` 0:
@@ -364,17 +365,35 @@ controller with other values gets the first one's, unchecked). With
   missing. Each axis is 0 when the IOC starts. `TP` and `TS` replies that do
   not echo their command are errors.
 - **The poll.** Busy: the axis is done (it cannot move), its count kept.
-  Unknown or refused otherwise: done stays as last read (a moving axis is
-  never reported done) and the problem bit is set.
-- **Move, jog, home.** Sent only once the pair is selected; an absolute
-  target is computed from the axis's count read just before. Refused (busy,
-  unknown, or a home without `has_limits`): nothing sent and the problem bit
-  **latched until a later move, jog or home of that axis is accepted**.
-- **Stop never waits for a `CC`.** With the selection known and another pair
-  selected, nothing on this pair moves and nothing is sent. Otherwise
-  `<axis>ST` goes at once to the selected pair: this axis's own, or, while
-  the selection is unknown, the stepping pair if any steps (the only one this
-  driver moves).
+  A timeout, a malformed reply, an unknown selection or a `CC` refused with
+  another code (`TE-5` in local mode): the **comms-error bit**
+  (`CNTRL_COMM_ERR`: COMM/INVALID on the record) with done kept as last
+  read. Unlike the problem bit it does not make the record set MOVN 0 or
+  clear its jog buttons, so a stepping axis never reads DMOV 1 through a
+  missing reply, and a jog in progress can still be released. The problem
+  bit is not used for these.
+- **Move, home.** Sent only once the pair is selected; an absolute target is
+  computed from the axis's count read just before. Refused (busy, unknown,
+  or a home without `has_limits`): nothing sent, a console line, and no
+  alarm: the axis is idle and fine. The record ends the move done with VAL
+  left at the target and RBV where the axis is (on the fake, MISS stayed 0).
+  No latch: b8 latched the problem bit, after which the record cleared the
+  next jog's buttons, its release sent no `ST` and the jog ran past DHLM
+  (the re-review of #18).
+- **Jog.** `AG_UCJogAllowed` (below) 0 refuses it, nothing sent. Allowed and
+  refused (busy, unknown), or refused by the switch: the problem bit for
+  that one update, so the record clears its jog buttons rather than asking
+  again; the next poll clears it. An accepted move, jog or home clears the
+  problem and comms-error bits at once.
+- **Stop never waits for a `CC`.** Known and another pair selected: nothing
+  on this pair moves, nothing sent. Known and this pair: `<axis>ST` at once.
+  Unknown: `<axis>ST` at once only for an axis of `refPair_`, the only pair
+  that can be stepping; a stop for an idle axis of another pair sends
+  nothing (it would stop the stepping pair's axis of the same number: the
+  record sends a stop even to an idle axis).
+- **A failed resync** is not retried for 1 s, so a controller that answers
+  nothing (local mode, a stall) does not hold the poll lock, and a STOP
+  behind it, for a `CC?` timeout per axis.
 
 Outside the switches one fix: `PH2` sets axis 2's limit (upstream tested
 `PH3` twice). Upstream's step-amplitude lines are unchanged, so with
@@ -384,7 +403,8 @@ nothing but `VE`, `TS` and `TE` answers without it. The channel check and the
 per-axis count are worth proposing upstream as they stand; the init writes as
 an option.
 
-The selection and stop rules above are 2026.10.3b8 (the review of #18: on
+The comms-error, jog and stop-for-another-pair rules above are 2026.10.3b9
+(the re-review of #18); the selection rules 2026.10.3b8 (the review of #18: on
 b7 a single late reply mid-move zeroed the selection, after which the moving
 axis read done, its STOP went behind a refused `CC` and was dropped, and its
 steps were credited to nobody). On the first unit (geecs-epics `agtest1`,
@@ -407,7 +427,7 @@ and the `CC` (the fake) and are superseded.
   two at the maximum amplitude) and the record's time estimate.
 - **No re-entry to remote mode.** A USB replug is a power cycle (the AG-UC8
   is USB-powered): local mode, counters at 0. The IOC sends `MR` at creation
-  only, so afterwards every axis shows the problem bit (its `TP` unanswered,
+  only, so afterwards every axis shows the comms-error bit, COMM/INVALID (its `TP` unanswered,
   a `CC` answered `TE-5`, `CC?` unanswered) until the IOC is recreated, and
   its counts are those of before the replug.
 - **`CC?` while a pair steps** is not proven on the unit (it answered while
