@@ -13,8 +13,10 @@ entity_models:
   # "<controller>><channel>" when num_axes is above 4; 4 channels each).
   - name: NF874xController
     description: |-
-      An 8742 (or the master of a chain) on its Ethernet command port (TCP
-      23 by default; CR out, CR LF in, set here). Creation sends VE?; the
+      An 8742 (or the master of a chain) on its Ethernet command port (CR
+      out, CR LF in: manual 90066734D 6.1.1, set here; the manual names no
+      port number: upstream's example IOC and the quartiq Python driver use
+      23). Creation sends VE? (and, with check_moves, TE? until 0); the
       poller sends TP? and MD? per axis. The 8742's Ethernet port is not a
       serial line (decision 15 does not apply): the entity creates its own
       asyn IP port, as ESP300Controller does.
@@ -28,6 +30,7 @@ entity_models:
         type: str
         description: |-
           host:port of the controller's command port, e.g. 192.0.2.10:23
+          (23 per upstream's example IOC; confirm on the unit)
       P:
         type: str
         description: |-
@@ -72,6 +75,25 @@ entity_models:
           open-loop Picomotor has no home switch). false refuses a home with an
           error and sends nothing. Applies to every 874x controller in the IOC.
         default: false
+      jog_allowed:
+        type: bool
+        description: |-
+          Upstream: JOGF/JOGR send AC, VA and MV +/-, which runs until ST; an
+          open-loop Picomotor has no switch to end it and a lost link leaves
+          it running. false refuses a jog with an error and sends nothing.
+          Applies to every 874x controller in the IOC.
+        default: false
+      check_moves:
+        type: bool
+        description: |-
+          true: TE? after every motion command (and TE? until 0 at
+          creation); a non-zero code (x14 MOTION IN PROGRESS: an 8742 runs
+          one motor at a time; a refused argument) fails the command and
+          latches the axis's problem bit, a MAJOR STATE alarm, until a later
+          motion command is accepted. false is upstream: the queue is never
+          read and an ignored move completes silently at the old count.
+          Queries only. Applies to every 874x controller in the IOC.
+        default: true
       trace:
         type: bool
         description: |-
@@ -81,9 +103,11 @@ entity_models:
     pre_init:
       - when: first
         value: |
-          # ioc-motion's motorNewFocus patch (README): 1 = upstream behaviour
+          # ioc-motion's motorNewFocus patch (README): upstream is 1, 1, 1, 0
           var nf874xSetLimits {{ 1 if set_limits else 0 }}
           var nf874xHomeAllowed {{ 1 if home_allowed else 0 }}
+          var nf874xJogAllowed {{ 1 if jog_allowed else 0 }}
+          var nf874xCheckMoves {{ 1 if check_moves else 0 }}
       - value: |
           drvAsynIPPortConfigure("{{name}}_IP", "{{address}}", 0, 0, 0)
           {% if trace %}
@@ -98,7 +122,7 @@ entity_models:
   - name: NF874xAxis
     description: |-
       One Picomotor channel as a motor record ($(P)$(M)) on NF874xMotor.db
-      (MRES 1 step, RTRY 0, RSTM Never, DISP). Open loop: the readback is
+      (MRES 1 step, RTRY 1, RSTM Never, DISP). Open loop: the readback is
       the controller's step count since power-up or the last DH, not a
       measured position.
     parameters:
@@ -156,6 +180,21 @@ entity_models:
         description: |-
           Dial low limit, steps; 0 and 0 = no record limits
         default: 0
+      RTRY:
+        type: int
+        description: |-
+          Retries: the record compares TP? with VAL after a move and resends
+          the (absolute) PA when they differ by more than one step; an 8742
+          ignores a move while another motor of that controller runs, so 1
+          retries once, then MISS. 0 ends a dropped move silently unless
+          check_moves is on.
+        default: 1
+      DLY:
+        type: float
+        description: |-
+          Seconds the record waits after a move reads done before comparing
+          (and retrying)
+        default: 0.0
       PREC:
         type: int
         description: |-
@@ -180,5 +219,7 @@ entity_models:
           ACCL:
           DHLM:
           DLLM:
+          RTRY:
+          DLY:
           PREC:
           DISP: "{{ 1 if DISP else 0 }}"

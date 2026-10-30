@@ -14,8 +14,7 @@ pvlogging, **motorSim**) plus:
 | motorNewFocus | master 0f86a5b (2026-04-29; past R1-3) | [epics-motor/motorNewFocus](https://github.com/epics-motor/motorNewFocus) (ships no LICENSE file, as motorNewport); no upstream ibek-support recipe (TAU Systems' fork has a stock R1-3 one: tier 2, not used), so ours | tier 1, dependency, with one build-time patch of switches and fixes (below: NewFocus 8742 Picomotor) |
 
 Drivers for the other families geecs-epics' device catalogue assigns to
-this image (NewFocus Picomotor, Zaber) join it when their first device is
-ported.
+this image (Zaber) join it when their first device is ported.
 
 ## Build
 
@@ -792,8 +791,10 @@ limit polarity waits for a switch.
 `motorNewFocus`'s `874xMotorDriver` (epics-motor; APS) is a "model 3"
 asynMotor driver for the NewFocus 8742 (open loop, four Picomotor channels)
 and the 8743-CL (closed loop, two). One `nf874xCreateController` per TCP
-connection to a controller's Ethernet command port (TCP 23; CR out, CR LF
-in); the controllers of an RS-485 chain sit behind the master, four channels
+connection to a controller's Ethernet command port (CR out, CR LF in:
+manual 6.1.1; the manual names no port number, and 23 is what upstream's
+example IOC and the quartiq Python driver use; it serves up to four sockets
+at once, 5.4); the controllers of an RS-485 chain sit behind the master, four channels
 each, addressed `<controller>><channel>`. USB (vendor class `104d:4000`, the
 LabVIEW driver's route through NewFocus's .NET library) has no asyn route on
 Linux. The pin is master 0f86a5b rather than R1-3: upstream #19 (every axis
@@ -807,23 +808,32 @@ The ibek entities (`ibek-support-geecs/motorNewFocus/motorNewFocus.ibek.support.
 - `motorNewFocus.NF874xController` — the asyn IP port (`<name>_IP`, its
   terminators, the optional trace) and the driver: `num_axes` (4 per
   controller on the connection), poll periods, `write_only_delay_ms` (10,
-  upstream's example), and the two switches below. The 8742's Ethernet port
+  upstream's example), and the four switches below. The 8742's Ethernet port
   is not a serial line, so it takes no `geecsSerial.Port` (as
   `ESP300Controller`).
 - `motorNewFocus.NF874xAxis` — one channel (`unit` on the chain, `channel`
   1-4: ADDR = 4 x (unit - 1) + channel) as a motor record on
-  `NF874xMotor.db` (added by the patch: MRES 1 step, EGU steps, RTRY 0, RSTM
-  Never, DISP on by default).
+  `NF874xMotor.db` (added by the patch: MRES 1 step, EGU steps, RTRY 1 and
+  DLY 0 by default, RSTM Never, DISP on by default).
 
-**Open loop.** The readback is `TP?`, the controller's step count since
-power-up or the last `DH`; nothing measures the actuator. The record's
-retries would compare the count with itself, hence RTRY 0. A position
-redefine is the record's SET (`DH <n>`); RSTM Never and no autosave keep a
-boot from sending one.
+**Open loop, one motor at a time.** The readback is `TP?`, the controller's
+step count since power-up or the last `DH`; nothing measures the actuator.
+An 8742 drives one motor at a time (manual 3.5.5, 4.6): a `PA`, `PR` or `MV`
+sent while any channel of that controller moves is ignored with `x14,
+MOTION IN PROGRESS`, and upstream never reads the error queue, so the
+record would complete the move at the old count with no alarm (the review
+of #16 reproduced it on the fake). Two guards: `check_moves` (below) reads
+`TE?` after each motion command and latches the axis's problem bit, a
+MAJOR STATE alarm, and the record's RTRY 1 compares `TP?` with VAL and
+resends the absolute `PA` once, then sets MISS (MISS alone raises no alarm
+in motor R7-4). A position redefine is the record's SET (`DH <n>`); RSTM
+Never and no autosave keep a boot from sending one.
 
 ### What the stock driver and record send, and the patch
 
-Creation: `VE?` (the model, to pick open or closed loop). For an 8742, the
+Creation: `VE?` (the model, to pick open or closed loop; the manual's reply
+is `8742 Version 1.9 11/01/12`, the `*IDN?` shape is `New_Focus 8742 v1.9
+10/23/12 SN10001`). For an 8742, the
 axes send nothing; the poller sends `<axis> TP?` and `<axis> MD?` per axis
 (an 8743-CL adds `MM?`, `SR?`, `SL?`, `PH?`). Note the driver passes
 num_axes + 1 to its base class, so with four channels the internal count is
@@ -842,7 +852,7 @@ traffic) and, under RSTM's conditions, `DH` (RSTM Never here). A home sends
 **`MT`/`MZ`** (8743-CL limit or index searches; an open-loop Picomotor has
 no switch).
 
-`motorNewFocus-geecs.patch` adds two iocsh variables, each defaulting to
+`motorNewFocus-geecs.patch` adds four iocsh variables, each defaulting to
 upstream behaviour (`variable()` lines in `devNewFocus.dbd`), two fixes and
 the database:
 
@@ -850,21 +860,32 @@ the database:
 |---|---|---|
 | `nf874xSetLimits` | 1: `SR`/`SL` from the record's DHLM/DLLM at init and on change | 0: kept in the driver, nothing sent; the record enforces its own limits |
 | `nf874xHomeAllowed` | 1: HOMF/HOMR send `AC`, `VA`, `MT`/`MZ` | 0: refused with an error, nothing sent |
-| `VE?` model parse | `strncpy` of 9 characters without a terminator, then a write through `strchr`'s result: a NULL dereference when the copy holds no space (an empty reply after a timeout, an identity such as `New_Focus 8742 ...`) | the model found anywhere in the reply (`8743-CL`, else `8742`), printed at start (fix, no switch) |
-| axis members on an 8742 | `limitChecking_`, the limits and the cached position set only for an 8743-CL: `home()` read an uninitialized flag | initialized for every model (fix, no switch) |
+| `nf874xJogAllowed` | 1: JOGF/JOGR send `AC`, `VA`, `MV +/-`, which runs until `ST` (no switch ends it on an open-loop Picomotor; a lost link leaves it running; the record's soft limit stops it only a poll later, about VELO x moving poll past it) | 0: refused with an error, nothing sent |
+| `nf874xCheckMoves` | 0: the error queue is never read; an ignored move ends silently | 1: `TE?` until 0 at creation (at most ten), and `TE?` (with the axis's `n>` prefix on a chain) after every `PA`/`PR`/`MV`; a non-zero code fails the command and latches the axis's problem bit until a later motion command is accepted. Queries only |
+| `VE?` read | `strncpy` of 9 characters without a terminator, then a write through `strchr`'s result: a NULL dereference when the copy holds no space. The manual's reply (`8742 Version 1.9 11/01/12`) parses; the crash is an empty or failed read (no controller at the address, a timeout), when `inString_` may also hold nothing written yet | the buffer zeroed and the read's status checked; the model found anywhere in the reply (`8743-CL`, else `8742`), printed at start (fix, no switch) |
+| axis members on an 8742 | `lastDirection_`, `limitChecking_`, the limits and the cached position set only for an 8743-CL: `poll()` read `lastDirection_` before the first move and `home()` read `limitChecking_`, undefined behaviour (a garbage direction bit in MSTA), not a crash. `updateInterval_`, `deadband_` and `followingError_` stay uninitialized (unused on an 8742) | initialized for every model (fix, no switch) |
 
-`NF874xController`'s `set_limits` and `home_allowed` render them and default
-to false: an IOC start sends `VE?` and the poll only. They are global to the
+`NF874xController`'s `set_limits`, `home_allowed`, `jog_allowed` and
+`check_moves` render them and default to false, false, false, true: an IOC
+start sends `VE?`, `TE?` and the poll only. They are global to the
 IOC (every 874x controller in it).
 
 ### Known gaps (0f86a5b, with the patch), from reading it
 
-- **The record moves absolutely.** With RTRY 0 the record never asks for a
+- **The record moves absolutely.** With UEIP 0 the record never asks for a
   relative move, so `PR` (and the controller's own relative count) is
   unused; a tweak is a `PA` to the new count.
 - **`%f` arguments.** Every numeric argument is sent as `%f`
-  (`1>1 PA 1300.000000`); whether the 8742 parses a decimal point is
-  unproven here (upstream's example IOC drives an 8742 this way).
+  (`1>1 PA 1300.000000`); the manual calls them integers and says
+  "decimal format only" (5.2), and upstream's example IOC drives an 8742
+  this way. Unproven here; with `check_moves` a refusal shows as the
+  problem bit and MISS rather than a silent stop (geecs-epics' fake runs
+  that case with `--integer-args`).
+- **`check_moves` reads one error per motion command.** `TE?` returns one
+  entry of a ten-deep queue: a `VA` refused before an accepted `PA` (x10)
+  also fails the move, and several errors from one command line are read
+  one per later move. Errors a slave queues are read through its prefix;
+  only the master's queue is drained at creation.
 - **No limits, no home, no motor check.** The 8742 has no limit inputs;
   MSTA's home bit is the driver's "position is 0". `MC` (motor check: one
   step each way on every channel) and `QM` are never sent.

@@ -21,13 +21,15 @@ libs:
   - motor
   - asyn
 
-# The patch (motorNewFocus-geecs.patch): two iocsh variables, upstream
-# behaviour (1) by default:
+# The patch (motorNewFocus-geecs.patch): four iocsh variables, upstream
+# behaviour by default:
 #   nf874xSetLimits    (874xMotorDriver.cpp)  1: SR/SL from the record's DHLM/DLLM at init and on change; 0: nothing sent
 #   nf874xHomeAllowed  (874xMotorDriver.cpp)  1: HOMF/HOMR send AC, VA, MT/MZ; 0: refused with an error
-# two fixes (no switch): the VE? model parse (a NULL dereference upstream) and
-# the axis members an 8742 left uninitialized; and newFocusApp/Db/NF874xMotor.db
-# (RTRY 0, RSTM Never, DISP).
+#   nf874xJogAllowed   (874xMotorDriver.cpp)  1: JOGF/JOGR send AC, VA, MV; 0: refused with an error
+#   nf874xCheckMoves   (874xMotorDriver.cpp)  0: the error queue never read; 1: TE? after each motion command, a code latches the problem bit
+# two fixes (no switch): the VE? read (a NULL dereference upstream on an empty
+# or failed reply) and the axis members an 8742 left uninitialized (undefined
+# behaviour); and newFocusApp/Db/NF874xMotor.db (RTRY 1, RSTM Never, DISP).
 patch_file:
   path: motorNewFocus-geecs.patch
   when: true

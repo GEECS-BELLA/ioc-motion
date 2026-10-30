@@ -3,7 +3,9 @@
 The motion-controller image of GEECS-BELLA's native EPICS IOCs: the motor
 record on epics-containers' `ioc-motorsim` developer image (motor R7-4,
 asyn, autosave, motorSim, ...) plus `epics-motor/motorNewport` R1-3 (ESP300
-family, SMC100) and `epics-motor/motorAerotech` R1-1-1 (the Ensemble driver),
+family, SMC100), `epics-motor/motorAerotech` R1-1-1 (the Ensemble driver),
+`epics-motor/motorPIGCS2` R1-3-1 (PI's old "Hexapod" controller),
+`epics-motor/motorNewFocus` at master 0f86a5b (the NewFocus 8742 Picomotor),
 our `motorVelmex` (the Velmex VXM + VRO driver, README "Velmex VXM + VRO"),
 and `geecsSerial.Port`, the one serial-line entity every serial device
 takes (local tty, raw TCP, RFC 2217: geecs-epics decision 15).
@@ -47,10 +49,14 @@ Details, the patch and the driver's gaps: `README.md`.
   (README "Aerotech Ensemble", "Power policy"; proven on the controller 2026-10-29).
   The `EnsembleAxis` entity renders `UEIP` Yes (RBV from the encoder) and `RDBD`.
   `ibek-support-geecs/motorNewFocus/motorNewFocus-geecs.patch`: iocsh
-  variables `nf874xSetLimits` and `nf874xHomeAllowed`, C default 1 (upstream:
-  the record's DHLM/DLLM sent as the 8743-CL's SR/SL at every init; HOMF/HOMR
-  send MT/MZ); the `NF874xController` entity's `set_limits` / `home_allowed`
-  default to false; plus the `VE?` parse fix and `NF874xMotor.db` (README
+  variables `nf874xSetLimits`, `nf874xHomeAllowed`, `nf874xJogAllowed` (C
+  default 1, upstream: the record's DHLM/DLLM sent as the 8743-CL's SR/SL at
+  every init; HOMF/HOMR send MT/MZ; JOGF/JOGR send an unbounded MV) and
+  `nf874xCheckMoves` (C default 0, upstream: the error queue is never read, so
+  a move the 8742 ignores ends silently); the `NF874xController` entity's
+  `set_limits` / `home_allowed` / `jog_allowed` default to false and
+  `check_moves` to true; plus the `VE?` read fix (an empty reply), the 8742
+  axis members (undefined behaviour) and `NF874xMotor.db` (RTRY 1; README
   "NewFocus 8742 Picomotor").
 - **Images.** CI publishes on a git tag, CalVer `YYYY.M.N` (`2026.10.1`;
   never re-push a tag): `ghcr.io/geecs-bella/ioc-motion-runtime:<tag>` (what hosts
