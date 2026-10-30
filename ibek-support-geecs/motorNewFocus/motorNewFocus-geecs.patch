@@ -52,7 +52,7 @@ index 0000000..8e47142
 +	field(DISP, "$(DISP=0)")
 +}
 diff --git a/newFocusApp/src/874xMotorDriver.cpp b/newFocusApp/src/874xMotorDriver.cpp
-index ec63c07..b755d97 100644
+index ec63c07..b2f362c 100644
 --- a/newFocusApp/src/874xMotorDriver.cpp
 +++ b/newFocusApp/src/874xMotorDriver.cpp
 @@ -27,6 +27,38 @@ March 4, 2011
@@ -159,7 +159,15 @@ index ec63c07..b755d97 100644
    // For daisy-chained controllers, assuming k axes per controller, and controllers number (1, 2, ...)
    // 8742 has 4 axes per controller; 8743 with closed-loop support only has 2.
    // Note that axis 1>3 addresses the same motor as bare 3, but response strings will be prefixed with 1>.
-@@ -311,6 +385,8 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
+@@ -296,6 +370,7 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
+   asynStatus status;
+   double targetPosition_;
+   
++  drainLateErrors();
+   sprintf(pC_->outString_, "%s AC %f", axisName_, acceleration);
+   status = pC_->writeController();
+   sprintf(pC_->outString_, "%s VA %f", axisName_, maxVelocity);
+@@ -311,6 +386,8 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
    
    status = pC_->writeController();
    lastDirection_ = targetPosition_ > encoderPosition_;
@@ -168,7 +176,7 @@ index ec63c07..b755d97 100644
    return status;
  }
  
-@@ -324,6 +400,13 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
+@@ -324,6 +401,13 @@ asynStatus nf874xAxis::move(double position, int relative, double minVelocity,
  asynStatus nf874xAxis::home(double minVelocity, double maxVelocity, double acceleration, int forwards)
  {
    asynStatus status;
@@ -182,7 +190,7 @@ index ec63c07..b755d97 100644
    
    sprintf(pC_->outString_, "%s AC %f", axisName_, acceleration);
    status = pC_->writeController();
-@@ -350,6 +433,12 @@ asynStatus nf874xAxis::moveVelocity(double minVelocity, double maxVelocity, doub
+@@ -350,10 +434,17 @@ asynStatus nf874xAxis::moveVelocity(double minVelocity, double maxVelocity, doub
    double speed=maxVelocity;
    int forwards=1;
  
@@ -195,7 +203,12 @@ index ec63c07..b755d97 100644
    if (speed < 0) {
      speed = -speed;
      forwards = 0;
-@@ -361,6 +450,8 @@ asynStatus nf874xAxis::moveVelocity(double minVelocity, double maxVelocity, doub
+   }
++  drainLateErrors();
+   sprintf(pC_->outString_, "%s AC %f", axisName_, acceleration);
+   status = pC_->writeController();
+   sprintf(pC_->outString_, "%s VA %f", axisName_, speed);
+@@ -361,6 +452,8 @@ asynStatus nf874xAxis::moveVelocity(double minVelocity, double maxVelocity, doub
    sprintf(pC_->outString_, "%s MV %s", axisName_, forwards ? "+" : "-");
    status = pC_->writeController();
    lastDirection_ = forwards;
@@ -204,7 +217,7 @@ index ec63c07..b755d97 100644
    return status;
  }
  
-@@ -444,9 +535,11 @@ asynStatus nf874xAxis::doMoveToHome()
+@@ -444,9 +537,11 @@ asynStatus nf874xAxis::doMoveToHome()
  asynStatus nf874xAxis::setHighLimit(double highLimit) {
    asynStatus status;
  
@@ -217,7 +230,7 @@ index ec63c07..b755d97 100644
    return status;
  }
  
-@@ -456,9 +549,11 @@ asynStatus nf874xAxis::setHighLimit(double highLimit) {
+@@ -456,9 +551,11 @@ asynStatus nf874xAxis::setHighLimit(double highLimit) {
  asynStatus nf874xAxis::setLowLimit(double lowLimit) {
    asynStatus status;
  
@@ -230,7 +243,7 @@ index ec63c07..b755d97 100644
    return status;
  }
  
-@@ -565,11 +660,64 @@ asynStatus nf874xAxis::poll(bool *moving)
+@@ -565,11 +662,100 @@ asynStatus nf874xAxis::poll(bool *moving)
          driverName, functionName, comStatus);
    }
    
@@ -240,6 +253,44 @@ index ec63c07..b755d97 100644
    return comStatus ? asynError : asynSuccess;
  }
  
++/** ioc-motion: with nf874xCheckMoves, read this axis's controller's error
++  * queue before a motion command (TE? until 0, at most ten). An 8742 queues
++  * "x08, MOTOR NOT CONNECTED" after the TE? that follows the PA (its motor
++  * detection runs during the move attempt: U_BlueDiodePicos, 2026-10-30, the
++  * PA's TE? read 0 and the code arrived for the next command's TE?), so a
++  * code found here belongs to an earlier command: it is not this move's. A
++  * channel code (x >= 1) is charged to that channel's axis (its problem bit
++  * latched, as after a refused move); a general code is logged only. */
++void nf874xAxis::drainLateErrors()
++{
++  if (!nf874xCheckMoves)
++    return;
++  const char *gt = strchr(axisName_, '>');
++  int ctl = gt ? atoi(axisName_) : 0;
++  for (int i = 0; i < 10; i++) {
++    if (gt)
++      sprintf(pC_->outString_, "%d>TE?", ctl);
++    else
++      sprintf(pC_->outString_, "TE?");
++    memset(pC_->inString_, 0, sizeof(pC_->inString_));
++    if (pC_->writeReadController() != asynSuccess) return;
++    const char *r = strchr(pC_->inString_, '>');
++    int code = atoi(r ? r + 1 : pC_->inString_);
++    if (code == 0) return;
++    int ch = code / 100;
++    int axisNo = gt ? (ctl - 1) * 4 + ch : ch;
++    nf874xAxis *owner = (ch >= 1 && ch <= 4) ? pC_->getAxis(axisNo) : NULL;
++    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
++        "%s: before a move on %s: a late code TE? %d%s\n", driverName, axisName_, code,
++        owner ? " (charged to its channel's axis, problem bit latched)" : "");
++    if (owner) {
++      owner->moveError_ = code;
++      pC_->setIntegerParam(owner->axisNo_, pC_->motorStatusProblem_, 1);
++      pC_->callParamCallbacks(owner->axisNo_);
++    }
++  }
++}
++
 +/** ioc-motion: with nf874xCheckMoves, read the controller's error queue after
 +  * a motion command (TE?, through the axis's controller prefix on a chain).
 +  * A non-zero code fails the command and latches the problem bit until a
@@ -268,10 +319,8 @@ index ec63c07..b755d97 100644
 +    asynPrint(pasynUser_, ASYN_TRACE_ERROR,
 +        "%s: axis %s: %s refused, TE? %d (problem bit latched)\n",
 +        driverName, axisName_, what, code);
-+    // The queue holds one entry per error and TE? reads one: a move and its
-+    // retry refused leave a second code that the next axis's TE? would read
-+    // as its own (U_BlueDiodePicos, 2026-10-30: m5's second 2>108 flagged
-+    // m6's first move). Read the rest now, at most nine more.
++    // The queue holds one entry per error and TE? reads one: read the rest
++    // now, at most nine more, so none is left for another axis's TE?.
 +    for (int i = 0; i < 9; i++) {
 +      memset(pC_->inString_, 0, sizeof(pC_->inString_));
 +      if (pC_->writeReadController() != asynSuccess) break;
@@ -297,18 +346,19 @@ index ec63c07..b755d97 100644
    * \param[in] interval Time in seconds between static position regulation
    */
 diff --git a/newFocusApp/src/874xMotorDriver.h b/newFocusApp/src/874xMotorDriver.h
-index 8d45846..95319ab 100644
+index 8d45846..af50cec 100644
 --- a/newFocusApp/src/874xMotorDriver.h
 +++ b/newFocusApp/src/874xMotorDriver.h
-@@ -40,6 +40,7 @@ public:
+@@ -40,6 +40,8 @@ public:
    asynStatus setUpdateInterval(double interval);
    asynStatus setDeadband(int deadband);
    asynStatus setFollowingError(int threshold);
 +  asynStatus checkMoveError(const char *what);  /* ioc-motion */
++  void drainLateErrors();                      /* ioc-motion */
  
  private:
    nf874xController *pC_;        /**< Pointer to the asynMotorController to which this axis belongs.
-@@ -54,7 +55,8 @@ private:
+@@ -54,7 +56,8 @@ private:
    double lowLimit_;             /**< Value of negative direction hardware limit set */
    double updateInterval_;       /**< Time in seconds of closed-loop update interval */
    double deadband_;             /**< Positioning range for avoiding limit cycling */

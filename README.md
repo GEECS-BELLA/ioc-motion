@@ -1257,7 +1257,7 @@ the database:
 | `nf874xSetLimits` | 1: `SR`/`SL` from the record's DHLM/DLLM at init and on change | 0: kept in the driver, nothing sent; the record enforces its own limits |
 | `nf874xHomeAllowed` | 1: HOMF/HOMR send `AC`, `VA`, `MT`/`MZ` | 0: refused with an error, nothing sent |
 | `nf874xJogAllowed` | 1: JOGF/JOGR send `AC`, `VA`, `MV +/-`, which runs until `ST` (no switch ends it on an open-loop Picomotor; a lost link leaves it running; the record's soft limit stops it only a poll later, about VELO x moving poll past it) | 0: refused with an error, nothing sent |
-| `nf874xCheckMoves` | 0: the error queue is never read; an ignored move ends silently | 1: `TE?` until 0 at creation on every controller of the chain (at most ten each), and `TE?` (with the axis's `n>` prefix on a chain) after every `PA`/`PR`/`MV`; a non-zero code fails the command, latches the axis's problem bit until a later motion command is accepted, and the rest of that controller's queue is read at once (so a move and its retry, both refused, do not leave a code for the next axis). Queries only |
+| `nf874xCheckMoves` | 0: the error queue is never read; an ignored move ends silently | 1: `TE?` until 0 at creation on every controller of the chain (at most ten each), and `TE?` (with the axis's `n>` prefix on a chain) after every `PA`/`PR`/`MV`; a non-zero code fails the command, latches the axis's problem bit until a later motion command is accepted, and the rest of that controller's queue is read at once; and before every `PA`/`PR`/`MV` the axis's controller's queue is read to 0, a late channel code (an 8742's x08 arrives after the `TE?` that follows the move) charged to its own channel's axis (problem bit latched) rather than to the move about to be sent. Queries only |
 | `VE?` read | `strncpy` of 9 characters without a terminator, then a write through `strchr`'s result: a NULL dereference when the copy holds no space. The manual's reply (`8742 Version 1.9 11/01/12`) parses; the crash is an empty or failed read (no controller at the address, a timeout), when `inString_` may also hold nothing written yet | the buffer zeroed and the read's status checked; the model found anywhere in the reply (`8743-CL`, else `8742`), printed at start (fix, no switch) |
 | axis members on an 8742 | `lastDirection_`, `limitChecking_`, the limits and the cached position set only for an 8743-CL: `poll()` read `lastDirection_` before the first move and `home()` read `limitChecking_`, undefined behaviour (a garbage direction bit in MSTA), not a crash. `updateInterval_`, `deadband_` and `followingError_` stay uninitialized (unused on an 8742) | initialized for every model (fix, no switch) |
 
@@ -1298,10 +1298,16 @@ set by its auto-detection during each channel's first move: all eight read
   that ran (U_BlueDiodePicos m2, 2026-10-30). In x14 the x is the channel
   that is moving, not the one commanded (`1>114` when 1>2 was commanded
   while 1>1 ran): any non-zero code fails the command, whichever its x.
-  2026.10.3b1 read one code per command, so the second of a refused move
-  and its retry was read by the next axis's first `TE?` (m6's first move
-  flagged by m5's 108, then cleared by its retry); from 2026.10.3b13 the
-  rest of the queue is read with the first.
+  An 8742 queues x08 (MOTOR NOT CONNECTED) late: on U_BlueDiodePicos the
+  `TE?` right after a move to an empty channel read 0, the record's retry
+  (RBV had not moved) read the first move's 108, and the retry's own 108 was
+  read by the next axis's first `TE?` (m6 flagged, then cleared by its own
+  retry). 2026.10.3b13 reads the rest of the queue after a non-zero code;
+  2026.10.3b14 also reads the queue before every motion command and charges
+  a late channel code to its own channel's axis. So an empty channel is
+  caught by RTRY (the count did not change), its alarm arrives with the retry
+  or at the next motion command on that controller, and no other axis is
+  flagged for it.
 - **No limits, no home, no motor check.** The 8742 has no limit inputs;
   MSTA's home bit is the driver's "position is 0". `MC` (motor check: one
   step each way on every channel) and `QM` are never sent.
