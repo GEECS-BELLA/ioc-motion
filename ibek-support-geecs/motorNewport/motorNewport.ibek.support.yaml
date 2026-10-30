@@ -443,9 +443,12 @@ entity_models:
           Upstream: CC before every command and poll, its result ignored, so
           while one pair moves another pair's poll reads the moving pair and a
           move for another pair goes to the moving pair's axis. false sends CC
-          only on a pair change, checks TE, and refuses (move) or skips (poll)
-          what a refused CC would misdirect. Applies to every AG_UC controller
-          in the IOC.
+          only on a pair change, checks TE, refuses (move, latched problem)
+          or skips (poll) what a refused CC would misdirect, keeps each
+          axis's own count, never loses the selection to a missing reply (it
+          is learned again with CC? or TS), and sends a STOP without a CC.
+          README "Agilis AG-UC8". Applies to every AG_UC controller in the
+          IOC.
         default: false
 
     pre_init:
@@ -528,7 +531,10 @@ entity_models:
       DHLM:
         type: float
         description: |-
-          Dial high limit (steps, from the step counter's zero: power-up or ZP)
+          Dial high limit (steps). With channel_upstream false the count is
+          the driver's, 0 when the IOC starts, so the limits are relative to
+          where the axis stood then (upstream: the controller's slot counter,
+          zeroed at power-up or ZP)
         default: 0
       DLLM:
         type: float

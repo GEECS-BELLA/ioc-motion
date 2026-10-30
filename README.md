@@ -338,17 +338,57 @@ defaulting to upstream behaviour (`variable()` lines in `devNewport.dbd`):
 | Variable | 1 (upstream) | 0 |
 |---|---|---|
 | `AG_UCInitWrites` | `RS` at creation, `SU` forward and reverse per axis | neither: creation sends `MR` and `VE` only |
-| `AG_UCChannelUpstream` | `CC` before every command and every axis poll, result ignored; position = `TP` | `CC` only when the pair changes, then `TE`; refused (-6), that axis's poll is skipped (done, its last position kept), its move, jog or home is not sent (an error, the problem bit until its next poll), and its stop sends nothing (only the selected pair can move). Each axis keeps its own count (0 at IOC start): every change of a slot's `TP` is credited to the selected pair's axis in that slot; after an accepted `CC` both slots are read (`1TP`, `2TP`) and credited to the outgoing pair (its steps since its last poll: the counters carry over a `CC` and the new pair has not moved yet), and the same reads are the new pair's references |
+| `AG_UCChannelUpstream` | `CC` before every command and every axis poll, result ignored; position = `TP` | the selection kept and checked, each axis its own count, a STOP never behind a `CC` (below) |
 
 `AG_UCController`'s `init_writes` and `channel_upstream` render them and
-default to false; they are global to the IOC. Outside the switches, two
-fixes: `PH2` sets axis 2's limit (upstream tested `PH3` twice), and the
-reverse amplitude's default is applied to the reverse amplitude. `MR` stays:
+default to false; they are global to the IOC (`when: first`: a second
+controller with other values gets the first one's, unchecked). With
+`AG_UCChannelUpstream` 0:
+
+- **The selection.** The driver keeps the pair the controller has selected
+  and whether that is known now, apart from `refPair_`, the pair the slots'
+  counts are credited to. `CC` goes only on a pair change, then `TE`:
+  `TE0` selected; `TE-6` busy (the selected pair steps, the selection
+  unchanged); anything else (no reply, `TE-5` in local mode, another code, a
+  malformed reply) leaves the selection **unknown**, never "none". It is
+  learned again with `CC?`, or, if that goes unanswered, from a slot that
+  steps (`1TS`/`2TS` not 0): then the selected pair is `refPair_`, the only
+  pair this driver has moved.
+- **The counts.** Every change of a slot's `TP` is credited to `refPair_`'s
+  axis in that slot. `refPair_` changes only after an accepted `CC`: the pair
+  it leaves was idle (or the `CC` would have been refused), the counters
+  carry over, and nothing has moved the new pair yet, so the slots are read
+  then (`1TP`, `2TP`), credited to the old pair, and become the new pair's
+  references. A move goes only to the selected pair once it is `refPair_`,
+  so no step is lost or credited to the wrong axis whichever reply goes
+  missing. Each axis is 0 when the IOC starts. `TP` and `TS` replies that do
+  not echo their command are errors.
+- **The poll.** Busy: the axis is done (it cannot move), its count kept.
+  Unknown or refused otherwise: done stays as last read (a moving axis is
+  never reported done) and the problem bit is set.
+- **Move, jog, home.** Sent only once the pair is selected; an absolute
+  target is computed from the axis's count read just before. Refused (busy,
+  unknown, or a home without `has_limits`): nothing sent and the problem bit
+  **latched until a later move, jog or home of that axis is accepted**.
+- **Stop never waits for a `CC`.** With the selection known and another pair
+  selected, nothing on this pair moves and nothing is sent. Otherwise
+  `<axis>ST` goes at once to the selected pair: this axis's own, or, while
+  the selection is unknown, the stepping pair if any steps (the only one this
+  driver moves).
+
+Outside the switches one fix: `PH2` sets axis 2's limit (upstream tested
+`PH3` twice). Upstream's step-amplitude lines are unchanged, so with
+`init_writes` true a reverse amplitude of 0 still sends `SU-50` as the
+forward amplitude and then `SU0` (refused by the controller). `MR` stays:
 nothing but `VE`, `TS` and `TE` answers without it. The channel check and the
 per-axis count are worth proposing upstream as they stand; the init writes as
 an option.
 
-On the first unit (geecs-epics `agtest1`, 2026-10-29, tag 2026.10.3b7): a
+The selection and stop rules above are 2026.10.3b8 (the review of #18: on
+b7 a single late reply mid-move zeroed the selection, after which the moving
+axis read done, its STOP went behind a refused `CC` and was dropped, and its
+steps were credited to nobody). On the first unit (geecs-epics `agtest1`,
+2026-10-29, tag 2026.10.3b7): a
 boot sends `MR` and `VE`, then the poll's `CC1`/`CC2` and queries only; all
 four configured axes moved ±10 and ±50 steps through the record and back,
 each reading its own count; the poll's `CC` was refused (`TE-6`) while a pair
@@ -366,8 +406,12 @@ and the `CC` (the fake) and are superseded.
   the jog's speed code (`JA1`..`JA4`: 5, 100, 666 or 1700 steps/s, the last
   two at the maximum amplitude) and the record's time estimate.
 - **No re-entry to remote mode.** A USB replug is a power cycle (the AG-UC8
-  is USB-powered): local mode, counters at 0. The IOC's polls then time out
-  (the problem bit) until it is restarted.
+  is USB-powered): local mode, counters at 0. The IOC sends `MR` at creation
+  only, so afterwards every axis shows the problem bit (its `TP` unanswered,
+  a `CC` answered `TE-5`, `CC?` unanswered) until the IOC is recreated, and
+  its counts are those of before the replug.
+- **`CC?` while a pair steps** is not proven on the unit (it answered while
+  idle); the `TS` fallback covers it.
 - **Positions are counts since the IOC started.** With the patch each axis
   starts at 0 when the IOC does (the controller cannot say which pair took
   the steps its slot counter holds); nothing in the controller survives a

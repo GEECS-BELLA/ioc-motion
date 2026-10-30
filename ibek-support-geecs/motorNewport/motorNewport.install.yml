@@ -24,8 +24,7 @@ libs:
 #   SMC100StatusUpstream (SMC100Driver.cpp) fixed-position TS decoding (1) or every state and error bit (0)
 #   AG_UCInitWrites      (AG_UC.cpp)       RS at creation and SU per axis (1) or MR and VE only (0)
 #   AG_UCChannelUpstream (AG_UC.cpp)       CC before everything, unchecked (1) or on a pair change, checked with TE (0)
-# plus two AG_UC fixes outside the switches (PH for axis 2; the reverse
-# amplitude's default). README "Agilis AG-UC8".
+# plus one AG_UC fix outside the switches (PH for axis 2). README "Agilis AG-UC8".
 patch_file:
   path: motorNewport-geecs.patch
   when: true
