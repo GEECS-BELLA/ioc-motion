@@ -38,7 +38,8 @@ Details, the patch and the driver's gaps: `README.md`.
   `SMC100Motor.db` (README "SMC100"). And `AG_UCInitWrites` and
   `AG_UCChannelUpstream`, C default 1 (upstream: `RS` and `SU` per axis at
   boot; `CC` unchecked, so while one pair moves another pair's poll and move
-  go to it), entity defaults false (README "Agilis AG-UC8").
+  go to it; `TP`, a per-slot counter shared by the pairs, read as each axis's
+  position), entity defaults false (README "Agilis AG-UC8").
   `ibek-support-geecs/motorAerotech/aerotech-ensemble.patch`:
   iocsh variable `EnsembleInitWrites`, C default 1 (upstream: a `NONE` probe,
   `RAMP MODE` and `WAIT MODE NOWAIT` at config); the `EnsembleSetup`

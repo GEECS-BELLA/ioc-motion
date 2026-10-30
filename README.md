@@ -325,6 +325,12 @@ amplitude becomes -50: a second reverse setting). Each poll of an axis sends
   or stop sent then for an axis of another pair goes to the moving pair's
   axis of the same number (`PR` is refused by a moving axis, accepted by an
   idle one: the wrong actuator moves).
+- **One position per axis slot, not per axis.** The AG-UC8's step counter
+  belongs to the slot (axis 1 or 2), shared by the four pairs: on the first
+  unit (2026-10-29) `1PR10` on pair 1, then `CC2` (accepted, `TE0`), and
+  `1TP` answered `1TP10`. Upstream reads `TP` as each axis's position, so
+  every pair's axis n shows the same position, and an absolute move on one
+  pair is computed from steps another pair took.
 
 `motorNewport-geecs.patch`'s AG_UC part adds two iocsh variables, both
 defaulting to upstream behaviour (`variable()` lines in `devNewport.dbd`):
@@ -332,7 +338,7 @@ defaulting to upstream behaviour (`variable()` lines in `devNewport.dbd`):
 | Variable | 1 (upstream) | 0 |
 |---|---|---|
 | `AG_UCInitWrites` | `RS` at creation, `SU` forward and reverse per axis | neither: creation sends `MR` and `VE` only |
-| `AG_UCChannelUpstream` | `CC` before every command and every axis poll, result ignored | `CC` only when the pair changes, then `TE`; refused (-6), that axis's poll is skipped (done, its last position kept), its move, jog or home is not sent (an error, the problem bit until its next poll), and its stop sends nothing (only the selected pair can move) |
+| `AG_UCChannelUpstream` | `CC` before every command and every axis poll, result ignored; position = `TP` | `CC` only when the pair changes, then `TE`; refused (-6), that axis's poll is skipped (done, its last position kept), its move, jog or home is not sent (an error, the problem bit until its next poll), and its stop sends nothing (only the selected pair can move). Accepted, `1TP` and `2TP` are read as the slots' references, and each axis's position is its own count (0 at IOC start) plus its slot's steps since its pair was selected |
 
 `AG_UCController`'s `init_writes` and `channel_upstream` render them and
 default to false; they are global to the IOC. Outside the switches, two
@@ -353,9 +359,12 @@ worth proposing upstream as it stands; the init writes as an option.
 - **No re-entry to remote mode.** A USB replug is a power cycle (the AG-UC8
   is USB-powered): local mode, counters at 0. The IOC's polls then time out
   (the problem bit) until it is restarted.
-- **Positions are counts since power-up.** Nothing in the controller survives
-  a power cycle, so the record's position is relative to the last power-up
-  (or SET, an offset in the driver).
+- **Positions are counts since the IOC started.** With the patch each axis
+  starts at 0 when the IOC does (the controller cannot say which pair took
+  the steps its slot counter holds); nothing in the controller survives a
+  power cycle either. SET is an offset in the driver, and upstream computes
+  it from the offset-included position, so a second SET without a move in
+  between lands off by the first offset (unpatched; SET is not used here).
 
 ## Aerotech Ensemble
 
