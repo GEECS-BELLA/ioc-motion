@@ -49,6 +49,219 @@ index 0000000..acb5e82
 +	field(TWV,  "$(TWV=1)")
 +	field(DISP, "$(DISP=0)")
 +}
+diff --git a/newportApp/src/AG_UC.cpp b/newportApp/src/AG_UC.cpp
+index dc0796f..575081e 100644
+--- a/newportApp/src/AG_UC.cpp
++++ b/newportApp/src/AG_UC.cpp
+@@ -29,6 +29,26 @@ April 11, 2013
+ #define AGILIS_TIMEOUT 2.0
+ #define WRITE_DELAY 0.01
+ 
++/* ioc-motion: two switches, 1 = upstream behaviour. Set before iocInit.
++ * AG_UCInitWrites: 1 (upstream) sends RS at controller creation (a reset: every
++ *   temporary setting back to its default, local mode) and each axis's forward
++ *   and reverse step amplitude (SU) at axis creation; 0 sends neither, so
++ *   creation sends MR (remote mode, without which TP, PH and every motion
++ *   command are refused) and VE only.
++ * AG_UCChannelUpstream: 1 (upstream) sends CC<n> before every command and every
++ *   axis poll and ignores its result. The AG-UC8 refuses CC (error -6) while an
++ *   axis of the selected pair moves (user manual EDH0224En5010, 5.7), so the
++ *   poll of an axis on another pair reads the moving pair's TP and TS, and a
++ *   move or stop for it goes to the moving pair's axis of the same number.
++ *   0 sends CC only when the pair changes and reads TE after it; refused, the
++ *   axis's poll is skipped (done, its last position kept) and its move, jog or
++ *   home is not sent (the problem bit set until its next poll); its stop needs
++ *   nothing on the wire (only the selected pair can move). */
++volatile int AG_UCInitWrites = 1;
++extern "C" {epicsExportAddress(int, AG_UCInitWrites);}
++volatile int AG_UCChannelUpstream = 1;
++extern "C" {epicsExportAddress(int, AG_UCChannelUpstream);}
++
+ /** Creates a new AG_UCController object.
+   * \param[in] portName          The name of the asyn port that will be created for this driver
+   * \param[in] serialPortName    The name of the drvAsynSerialPort that was created previously to connect to the Agilis controller 
+@@ -48,6 +68,8 @@ AG_UCController::AG_UCController(const char *portName, const char *serialPortNam
+   asynStatus status;
+   static const char *functionName = "AG_UCController::AG_UCController";
+ 
++  currentChannel_ = 0;
++
+   /* Connect to Agilis controller */
+   status = pasynOctetSyncIO->connect(serialPortName, 0, &pasynUserController_, NULL);
+   if (status) {
+@@ -56,11 +78,13 @@ AG_UCController::AG_UCController(const char *portName, const char *serialPortNam
+       functionName);
+   }
+   
+-  // Reset the controller
+-  sprintf(outString_, "RS");
+-  status = writeAgilis(0);
+-  // Reset takes some time?
+-  epicsThreadSleep(0.5);
++  // Reset the controller (ioc-motion: only with AG_UCInitWrites)
++  if (AG_UCInitWrites) {
++    sprintf(outString_, "RS");
++    status = writeAgilis(0);
++    // Reset takes some time?
++    epicsThreadSleep(0.5);
++  }
+ 
+   // Put the controller in remote mode
+   sprintf(outString_, "MR");
+@@ -158,8 +182,16 @@ asynStatus AG_UCController::writeAgilis(int channelID, const char *output, doubl
+   // const char *functionName="writeAgilis";
+   
+   // If channelID is non-zero then we need to send the CC command first
+-  
+-  if (channelID != 0) setChannel(channelID);
++
++  if (channelID != 0) {
++    status = setChannel(channelID);
++    if (status && !AG_UCChannelUpstream) {
++      asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
++        "AG_UCController::writeAgilis: channel %d not selected (CC refused or failed), \"%s\" not sent\n",
++        channelID, output);
++      return status;
++    }
++  }
+ 
+   status = pasynOctetSyncIO->write(pasynUserController_, output,
+                                    strlen(output), timeout, &nwrite);
+@@ -173,13 +205,48 @@ asynStatus AG_UCController::writeAgilis(int channelID, const char *output, doubl
+ asynStatus AG_UCController::setChannel(int channelID)
+ {
+   char tempString[40];
++  char reply[40];
++  size_t nread;
++  int code;
+   asynStatus status;
+-  
++
++  // ioc-motion: with AG_UCChannelUpstream 0, CC only when the pair changes
++  // (none on an AG-UC2), and its result read back with TE.
++  if (!AG_UCChannelUpstream) {
++    if (channelID == 0) return asynSuccess;
++    if (channelID == currentChannel_) return asynSuccess;
++  }
+   sprintf(tempString, "CC%d", channelID);
+   status = writeController(tempString, AGILIS_TIMEOUT);
+   // Seems to be necessary to delay a short time between writes
+   epicsThreadSleep(WRITE_DELAY);
+-  return status;
++  if (AG_UCChannelUpstream) return status;
++  if (status) {
++    currentChannel_ = 0;
++    return status;
++  }
++  status = writeReadController("TE", reply, sizeof(reply), &nread, AGILIS_TIMEOUT);
++  epicsThreadSleep(WRITE_DELAY);
++  if (status) {
++    currentChannel_ = 0;
++    return status;
++  }
++  if (strncmp(reply, "TE", 2) != 0) {
++    asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
++      "AG_UCController::setChannel: CC%d, unexpected TE reply \"%s\"\n", channelID, reply);
++    currentChannel_ = 0;
++    return asynError;
++  }
++  code = atoi(&reply[2]);
++  if (code == 0) {
++    currentChannel_ = channelID;
++    return asynSuccess;
++  }
++  // -6: an axis of the selected pair moves, so the selection is unchanged
++  if (code != -6) currentChannel_ = 0;
++  asynPrint(pasynUserSelf, ASYN_TRACE_FLOW,
++    "AG_UCController::setChannel: CC%d refused, TE%d\n", channelID, code);
++  return asynError;
+ }
+ 
+ /** Reports on status of the driver
+@@ -239,11 +306,15 @@ AG_UCAxis::AG_UCAxis(AG_UCController *pC, int axisNo, bool hasLimits,
+     channelID_ = axisNo/2 + 1;
+   }
+   if (forwardAmplitude_ <= 0) forwardAmplitude_ = 50;
+-  if (reverseAmplitude_ >= 0) forwardAmplitude_ = -50;
+-  sprintf(pC_->outString_, "%dSU%d", axisID_, forwardAmplitude_);
+-  writeAgilis();
+-  sprintf(pC_->outString_, "%dSU%d", axisID_, reverseAmplitude_);
+-  writeAgilis();
++  // ioc-motion: upstream assigned forwardAmplitude_ here
++  if (reverseAmplitude_ >= 0) reverseAmplitude_ = -50;
++  // ioc-motion: only with AG_UCInitWrites
++  if (AG_UCInitWrites) {
++    sprintf(pC_->outString_, "%dSU%d", axisID_, forwardAmplitude_);
++    writeAgilis();
++    sprintf(pC_->outString_, "%dSU%d", axisID_, reverseAmplitude_);
++    writeAgilis();
++  }
+ }
+ 
+ /** Reports on status of the axis
+@@ -280,6 +351,11 @@ asynStatus AG_UCAxis::move(double position, int relative, double minVelocity, do
+     sprintf(pC_->outString_, "%dPR%d", axisID_, steps);
+   }
+   status = writeAgilis();
++  // ioc-motion: a move not sent shows as a problem until this axis's next poll
++  if (status && !AG_UCChannelUpstream) {
++    setIntegerParam(pC_->motorStatusProblem_, 1);
++    callParamCallbacks();
++  }
+   return status;
+ }
+ 
+@@ -320,6 +396,10 @@ asynStatus AG_UCAxis::stop(double acceleration )
+   asynStatus status;
+   //static const char *functionName = "AG_UCAxis::stop";
+ 
++  // ioc-motion: only the selected pair can move, so a stop for another pair
++  // needs nothing on the wire (and its CC would be refused while one moves)
++  if (!AG_UCChannelUpstream && channelID_ != 0 && pC_->currentChannel_ != 0 &&
++      channelID_ != pC_->currentChannel_) return asynSuccess;
+   sprintf(pC_->outString_, "%dST", axisID_);
+   status = writeAgilis();
+   return status;
+@@ -347,8 +427,17 @@ asynStatus AG_UCAxis::poll(bool *moving)
+   asynStatus comStatus;
+ 
+   //  Select this channel
+-  pC_->setChannel(channelID_);
+-  
++  comStatus = pC_->setChannel(channelID_);
++  // ioc-motion: CC refused (another pair is selected and moving): this axis
++  // cannot move, so it is done; its position stays the last one read
++  if (comStatus == asynError && !AG_UCChannelUpstream) {
++    setIntegerParam(pC_->motorStatusDone_, 1);
++    *moving = false;
++    callParamCallbacks();
++    return asynSuccess;
++  }
++  if (comStatus && !AG_UCChannelUpstream) goto skip;
++
+   // Read the current motor position
+   sprintf(pC_->outString_, "%dTP", axisID_);
+   comStatus = pC_->writeReadController();
+@@ -380,7 +469,8 @@ asynStatus AG_UCAxis::poll(bool *moving)
+   // The response string is of the form "PHn"
+   lim = atoi(&pC_->inString_[2]);
+   if ((axisID_ == 1) && (lim == 1 || lim == 3)) limit = 1;
+-  if ((axisID_ == 2) && (lim == 3 || lim == 3)) limit = 1;
++  // ioc-motion: upstream tested lim == 3 twice (PH2 is axis 2's limit, manual 4.7.4)
++  if ((axisID_ == 2) && (lim == 2 || lim == 3)) limit = 1;
+   setIntegerParam(pC_->motorStatusLowLimit_, limit);
+   setIntegerParam(pC_->motorStatusHighLimit_, limit);
+ 
+diff --git a/newportApp/src/AG_UC.h b/newportApp/src/AG_UC.h
+index 2858cb4..23ad49a 100644
+--- a/newportApp/src/AG_UC.h
++++ b/newportApp/src/AG_UC.h
+@@ -65,4 +65,5 @@ public:
+ private:
+   char controllerVersion_[40];
+   AG_UCModel_t AG_UCModel_;
++  int currentChannel_;   // ioc-motion: the pair the controller has selected, 0 = unknown
+ };
 diff --git a/newportApp/src/SMC100Driver.cpp b/newportApp/src/SMC100Driver.cpp
 index 05e9ef0..6d4c7e3 100644
 --- a/newportApp/src/SMC100Driver.cpp
@@ -197,10 +410,10 @@ index ec26a08..219e463 100644
  	default:
  	    rtnval = ERROR;
 diff --git a/newportApp/src/devNewport.dbd b/newportApp/src/devNewport.dbd
-index 428ade6..9e9c15d 100644
+index 428ade6..d1eb154 100644
 --- a/newportApp/src/devNewport.dbd
 +++ b/newportApp/src/devNewport.dbd
-@@ -23,6 +23,11 @@ registrar(SMC100Register)
+@@ -23,6 +23,13 @@ registrar(SMC100Register)
  #variable(devXPSC8Debug)
  #variable(drvXPSC8Debug)
  #variable(drvESP300debug)
@@ -209,6 +422,8 @@ index 428ade6..9e9c15d 100644
 +variable(ESP300SetLimits, int)
 +variable(SMC100SetterResend, int)
 +variable(SMC100StatusUpstream, int)
++variable(AG_UCInitWrites, int)
++variable(AG_UCChannelUpstream, int)
  #variable(drvMM3000debug)
  #variable(drvMM4000debug)
  #variable(drvPM500debug)

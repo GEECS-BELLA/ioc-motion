@@ -387,3 +387,189 @@ entity_models:
           DHLM:
           DLLM:
           INIT: ""
+
+  # Newport Agilis AG-UC2 / AG-UC8 / AG-UC8PC (AG_UC, a "model 3" asynMotor
+  # driver: open loop, positions are the controller's step counters, TP).
+  # The AG-UC8 drives four channel pairs of two axes, one pair selected at a
+  # time (CC); driver axis = (channel - 1) * 2 + (axis - 1). README "Agilis".
+  - name: AG_UCController
+    description: |-
+      One Agilis controller over a geecsSerial.Port (921600 8N1 over USB, CR LF:
+      the manual's settings, which the port entity must carry). With the
+      entity defaults creation sends MR (remote mode) and VE; the poller sends,
+      per axis, CC (only when the pair changes, then TE), TP, TS and PH.
+    parameters:
+      name:
+        type: id
+        description: |-
+          The motor driver's asyn port name (the axes' PORT)
+      port:
+        type: object
+        description: |-
+          The geecsSerial.Port this controller is on
+      P:
+        type: str
+        description: |-
+          PV prefix of this controller's motor records, with its trailing colon
+      num_axes:
+        type: int
+        description: |-
+          Driver axes: 8 for an AG-UC8 (four pairs), 2 for an AG-UC2. Axes
+          without an AG_UCAxis entity are not polled.
+        default: 8
+      moving_poll_ms:
+        type: int
+        description: |-
+          Poll period while any axis moves, ms. One pass is TP, TS and PH per
+          axis (about 16 ms each at 921600, plus the driver's 10 ms after each),
+          and CC + TE at each pair change.
+        default: 200
+      idle_poll_ms:
+        type: int
+        description: |-
+          Poll period while idle, ms
+        default: 1000
+      init_writes:
+        type: bool
+        description: |-
+          Upstream: RS (reset: the step amplitudes and every temporary setting
+          back to their defaults, local mode) at creation, and each axis's
+          step amplitudes (SU) at its creation. false sends neither. Applies to
+          every AG_UC controller in the IOC.
+        default: false
+      channel_upstream:
+        type: bool
+        description: |-
+          Upstream: CC before every command and poll, its result ignored, so
+          while one pair moves another pair's poll reads the moving pair and a
+          move for another pair goes to the moving pair's axis. false sends CC
+          only on a pair change, checks TE, and refuses (move) or skips (poll)
+          what a refused CC would misdirect. Applies to every AG_UC controller
+          in the IOC.
+        default: false
+
+    pre_init:
+      - when: first
+        value: |
+          # ioc-motion's AG_UC patch (README "Agilis"): 1 = upstream behaviour
+          var AG_UCInitWrites {{ 1 if init_writes else 0 }}
+          var AG_UCChannelUpstream {{ 1 if channel_upstream else 0 }}
+      - value: |
+          # AG_UCCreateController(motorPort, serialPort, numAxes, movingPollMs, idlePollMs)
+          AG_UCCreateController("{{name}}", "{{port.name}}", {{num_axes}}, {{moving_poll_ms}}, {{idle_poll_ms}})
+
+  - name: AG_UCAxis
+    description: |-
+      One Agilis axis (a channel pair's axis 1 or 2) as a motor record
+      ($(P)$(M)) on SMC100Motor.db (asynMotor, RSTM Never, RTRY 0, DISP), in
+      steps: MRES 1, the controller's step counter. Open loop: a step's size
+      depends on the direction, the step amplitude and the load (manual, SU).
+    parameters:
+      controller:
+        type: object
+        description: |-
+          The AG_UCController this axis is on
+      channel:
+        type: int
+        description: |-
+          The channel pair, 1..4 (1 on an AG-UC2)
+        default: 1
+      axis:
+        type: int
+        description: |-
+          The axis of the pair, 1 or 2
+        default: 1
+      M:
+        type: str
+        description: |-
+          PV suffix of the motor record, e.g. m1
+      DESC:
+        type: str
+        description: |-
+          Description
+        default: ""
+      has_limits:
+        type: bool
+        description: |-
+          The actuator has a limit switch (AG-LS25, AG-M050L, AG-M100L): the
+          record's home becomes MV (move to limit). false refuses home.
+        default: false
+      forward_amplitude:
+        type: int
+        description: |-
+          Step amplitude forward (1..50), sent at creation only with
+          init_writes; 0 = the driver's 50
+        default: 0
+      reverse_amplitude:
+        type: int
+        description: |-
+          Step amplitude backward (-1..-50), sent at creation only with
+          init_writes; 0 = the driver's -50
+        default: 0
+      DIR:
+        type: enum
+        description: |-
+          User direction
+        default: Pos
+        values:
+          Pos: Pos
+          Neg: Neg
+      VELO:
+        type: float
+        description: |-
+          Velocity (steps/s): not sent (PR runs at the controller's own rate),
+          the record's time estimate only; it picks the jog speed code
+        default: 100
+      ACCL:
+        type: float
+        description: |-
+          Seconds to velocity (record only)
+        default: 0.1
+      DHLM:
+        type: float
+        description: |-
+          Dial high limit (steps, from the step counter's zero: power-up or ZP)
+        default: 0
+      DLLM:
+        type: float
+        description: |-
+          Dial low limit (steps); 0 and 0 = no record limits
+        default: 0
+      RDBD:
+        type: float
+        description: |-
+          Retry deadband (steps); with RTRY 0 only DMOV's "at position" uses it
+        default: 0.5
+      DISP:
+        type: bool
+        description: |-
+          Disable puts to the record (DISP 1) at boot; readbacks stay live
+        default: true
+
+    pre_init:
+      - value: |
+          # AG_UCCreateAxis(motorPort, axis, hasLimits, forwardAmplitude, reverseAmplitude)
+          AG_UCCreateAxis("{{controller.name}}", {{(channel - 1) * 2 + axis - 1}}, {{ 1 if has_limits else 0 }}, {{forward_amplitude}}, {{reverse_amplitude}})
+
+    databases:
+      - file: SMC100Motor.db
+        args:
+          P: "{{controller.P}}"
+          M:
+          DESC:
+          PORT: "{{controller.name}}"
+          ADDR: "{{(channel - 1) * 2 + axis - 1}}"
+          DIR:
+          VELO:
+          VBAS: "0"
+          ACCL:
+          BDST: "0"
+          BVEL: "1"
+          BACC: "0.1"
+          MRES: "1"
+          PREC: "0"
+          EGU: steps
+          DHLM:
+          DLLM:
+          RDBD:
+          DISP: "{{ 1 if DISP else 0 }}"
